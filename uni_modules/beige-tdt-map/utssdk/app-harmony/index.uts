@@ -8,7 +8,7 @@ import { buildMapComponent, TDTMapBuilderOptions } from './builder.ets'
 import {
     TDMapOptions, MapClickDetail, MapBoundsDetail, MapErrorDetail, MapSizeDetail, MapViewportDetail,
     MapClickCallback, MapReadyCallback, MapErrorCallback, MarkerClickCallback, GeocodeCallback, SearchOptions,
-    MapLongClickCallback, CameraChangeCallback
+    MapLongClickCallback, CameraChangeCallback, ClusterOptions, HeatmapItem, HeatmapOptions
 } from '../interface.uts'
 
 // ⚠️ 天地图 Key 类型说明（自新系统升级后严格区分，混用会导致瓦片不显示）:
@@ -1482,4 +1482,92 @@ export function enableTilt(enabled: boolean): void {
 @UTSJS.keepAlive
 export function setCameraChangeCallback(callback: CameraChangeCallback): void {
     cameraChangeCallback = callback
+}
+
+// ══════════════════════════════════════════════
+// v1.7.0 新增：标记聚合 + 热力图（数据可视化）
+// context7: 华为官方指南 map-aggregate（完整示例代码）：
+// mapController.addClusterOverlay(mapCommon.ClusterOverlayParams { distance, clusterItems })
+// 返回 Promise<ClusterOverlay>；官方聚合自带"点击放大"（点击聚合簇自动放大展开，无需自实现）
+// distance 单位 vp（官方示例 100），ClusterItem = { position: { latitude, longitude } }
+// ══════════════════════════════════════════════
+let clusterOverlayRef: any = null
+let heatmapRef: any = null
+
+export function addMarkerCluster(points: Array<MapClickDetail>, options?: ClusterOptions): void {
+    const ctrl = mapController
+    if (ctrl == null) return
+    removeMarkerCluster()
+    if (points.length == 0) return
+    const items: Array<mapCommon.ClusterItem> = []
+    for (let i = 0; i < points.length; i++) {
+        items.push({ position: { latitude: points[i].lat, longitude: points[i].lng } })
+    }
+    const params: mapCommon.ClusterOverlayParams = {
+        distance: 100,
+        clusterItems: items
+    }
+    ctrl.addClusterOverlay(params).then((overlay: any) => {
+        clusterOverlayRef = overlay
+    }).catch((e: any) => {
+        console.error("TDTMap: 添加聚合图层失败: " + (e.message ?? String(e)))
+        if (onErrorCallback != null) {
+            onErrorCallback({ code: 4, message: "添加聚合图层失败: " + (e.message ?? String(e)) })
+        }
+    })
+}
+
+export function removeMarkerCluster(): void {
+    if (clusterOverlayRef != null) {
+        try { clusterOverlayRef.remove() } catch (e: any) { /* ignore */ }
+    }
+    clusterOverlayRef = null
+}
+
+// context7: 华为官方指南 map-heat（完整示例代码）：
+// ctrl.addHeatmap(mapCommon.HeatmapParams { id, data: WeightedLatLng[], radius, intensity })
+// 返回 Promise<Heatmap>；WeightedLatLng = { point: { latitude, longitude }, intensity }
+// ⚠️ 热力图起始 6.0.0(20)（HarmonyOS 6.0）：低版本 MapKit 无 addHeatmap 方法会抛异常，
+// try/catch 捕获后通过 mapError 显式上报（规则第 7 条：平台差异能力不得静默失败）
+export function addHeatmap(points: Array<HeatmapItem>, options?: HeatmapOptions): void {
+    const ctrl = mapController
+    if (ctrl == null) return
+    removeHeatmap()
+    if (points.length == 0) return
+    const data: Array<mapCommon.WeightedLatLng> = []
+    for (let i = 0; i < points.length; i++) {
+        data.push({
+            point: { latitude: points[i].lat, longitude: points[i].lng },
+            intensity: points[i].weight ?? 1
+        })
+    }
+    const params: mapCommon.HeatmapParams = {
+        id: 'tdt-heatmap',
+        data: data,
+        radius: options?.radius ?? 30,
+        intensity: { 1: 1, 5: 5, 8: 10 }
+    }
+    try {
+        ctrl.addHeatmap(params).then((heatmap: any) => {
+            heatmapRef = heatmap
+        }).catch((e: any) => {
+            console.error("TDTMap: 添加热力图失败: " + (e.message ?? String(e)))
+            if (onErrorCallback != null) {
+                onErrorCallback({ code: 4, message: "添加热力图失败: " + (e.message ?? String(e)) })
+            }
+        })
+    } catch (e: any) {
+        // 低版本 MapKit（< 6.0.0(20)）无 addHeatmap 方法：显式上报能力不支持
+        console.warn("TDTMap: 当前 MapKit 版本不支持热力图（需 HarmonyOS 6.0+）: " + (e.message ?? String(e)))
+        if (onErrorCallback != null) {
+            onErrorCallback({ code: 4, message: "当前 MapKit 版本不支持热力图（需 HarmonyOS 6.0 / API 20+）" })
+        }
+    }
+}
+
+export function removeHeatmap(): void {
+    if (heatmapRef != null) {
+        try { heatmapRef.remove() } catch (e: any) { /* ignore */ }
+    }
+    heatmapRef = null
 }
