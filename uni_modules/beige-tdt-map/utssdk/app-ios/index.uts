@@ -1416,3 +1416,53 @@ export function removeMarkerCluster(): void {
     clusterCircleLayerRef = null
     clusterSourceRef = null
 }
+
+// ⚠️ 编译期验证项：MLNHeatmapStyleLayer 类名与 heatmapWeight/heatmapRadius/heatmapOpacity
+// 属性（Mapbox iOS SDK 同源类）；若编译报错按官方 API 参考调整
+let heatmapLayerRef: MLNHeatmapStyleLayer | null = null
+let heatmapSourceRef: MLNShapeSource | null = null
+
+export function addHeatmap(points: Array<HeatmapItem>, options?: HeatmapOptions): void {
+    if (mapView == null || mapView.style == null) {
+        if (onErrorCallback != null) onErrorCallback({ code: 4, message: "样式未加载，无法添加热力图层" })
+        return
+    }
+    removeHeatmap()
+    if (points.length == 0) return
+    try {
+        const features: Array<MLNPointFeature> = []
+        for (let i = 0; i < points.length; i++) {
+            const f = new MLNPointFeature()
+            f.coordinate = CLLocationCoordinate2DMake(points[i].lat, points[i].lng)
+            f.attributes = NSDictionary.dictionaryWithObjectsForKeys([points[i].weight ?? 1], ["weight"]) as any
+            features.push(f)
+        }
+        const source = new MLNShapeSource("tdt-heatmap-source", features as MLNShape[], null)
+        mapView.style?.addSource(source)
+        heatmapSourceRef = source
+
+        const layer = new MLNHeatmapStyleLayer("tdt-heatmap-layer", source)
+        layer.heatmapWeight = NSExpression(forKeyPath: "weight")
+        layer.heatmapRadius = NSExpression(forConstantValue: (options?.radius ?? 30) as number)
+        layer.heatmapOpacity = NSExpression(forConstantValue: (options?.opacity ?? 0.6) as number)
+        mapView.style?.addLayer(layer)
+        heatmapLayerRef = layer
+    } catch (e) {
+        console.error("TDTMap: 添加热力图层失败: " + e.toString())
+        if (onErrorCallback != null) onErrorCallback({ code: 4, message: "添加热力图层失败: " + e.toString() })
+        removeHeatmap()
+    }
+}
+
+export function removeHeatmap(): void {
+    if (mapView != null && mapView.style != null) {
+        if (heatmapLayerRef != null) {
+            mapView.style?.removeLayer(heatmapLayerRef)
+        }
+        if (heatmapSourceRef != null) {
+            mapView.style?.removeSource(heatmapSourceRef)
+        }
+    }
+    heatmapLayerRef = null
+    heatmapSourceRef = null
+}
