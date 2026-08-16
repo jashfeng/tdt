@@ -174,7 +174,8 @@ export declare function setCameraChangeCallback(callback: CameraChangeCallback):
 // ═══ v1.7.0 新增：数据可视化（标记聚合 + 热力图）═══
 
 // 聚合选项：clusterRadius=聚合半径(像素,默认50)；clusterMaxZoom=最大聚合缩放级别(默认14，
-// 超过该级别聚合解散显示全部原始点；鸿蒙端官方聚合不支持自定义半径，仅 distance 固定 100vp)
+// 超过该级别聚合解散显示全部原始点。⚠️ 鸿蒙端官方聚合忽略 clusterRadius/clusterMaxZoom
+// （distance 固定 100vp，无最大缩放级别概念）
 export type ClusterOptions = {
     clusterRadius?: number
     clusterMaxZoom?: number
@@ -187,7 +188,8 @@ export type HeatmapItem = {
     weight?: number
 }
 
-// 热力选项：radius=热力辐射半径(像素,默认30)；opacity=整体透明度(0~1,默认0.6)
+// 热力选项：radius=热力辐射半径(像素,默认30)；opacity=整体透明度(0~1,默认0.6)。
+// ⚠️ 鸿蒙端忽略 opacity（透明度由官方 intensity 渐变控制），radius 生效
 export type HeatmapOptions = {
     radius?: number
     opacity?: number

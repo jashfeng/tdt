@@ -812,6 +812,9 @@ export function destroyMap(): void {
 
     mapController = null
     builderNode = null
+    // v1.7.0: 清理聚合/热力覆盖物引用（remove 函数不依赖 mapController，内部有 try/catch）
+    removeMarkerCluster()
+    removeHeatmap()
     onClickCallback = null
     onReadyCallback = null
     onErrorCallback = null
