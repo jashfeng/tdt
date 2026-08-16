@@ -8,6 +8,7 @@ import { Expression } from "org.maplibre.android.style.expressions"
 import { GeoJsonSource, GeoJsonOptions } from "org.maplibre.android.style.sources"
 import { CircleLayer, SymbolLayer, HeatmapLayer } from "org.maplibre.android.style.layers"
 import { FeatureCollection, Feature, Point } from "com.mapbox.geojson"
+import { JsonObject } from "com.google.gson"
 import { CameraPosition, CameraUpdateFactory } from "org.maplibre.android.camera"
 import { LatLng } from "org.maplibre.android.geometry"
 import { LatLngBounds } from "org.maplibre.android.geometry"
@@ -1893,4 +1894,55 @@ export function addMarkerCluster(points: Array<MapClickDetail>, options?: Cluste
 
 export function removeMarkerCluster(): void {
     removeClusterInternal()
+}
+
+export function addHeatmap(points: Array<HeatmapItem>, options?: HeatmapOptions): void {
+    const style = mapLibreMap?.getStyle()
+    const errorCb = onErrorCallback
+    if (style == null) {
+        if (errorCb != null) errorCb({ code: 4, message: "样式未加载，无法添加热力图层" })
+        return
+    }
+    removeHeatmap()
+    if (points.length == 0) return
+    try {
+        // 构建带 weight 属性的点要素（heatmap-weight 取该属性；无权重统一 1.0）
+        const features: Array<Feature> = []
+        for (let i = 0; i < points.length; i++) {
+            const props = new JsonObject()
+            props.addProperty("weight", (points[i].weight ?? 1).toDouble())
+            features.push(Feature.fromGeometry(
+                Point.fromLngLat(points[i].lng.toDouble(), points[i].lat.toDouble()),
+                props
+            ))
+        }
+        const source = new GeoJsonSource("tdt-heatmap-source", FeatureCollection.fromFeatures(features))
+        style.addSource(source)
+        heatmapSourceRef = source
+
+        const layer = new HeatmapLayer("tdt-heatmap-layer", "tdt-heatmap-source")
+        layer.setProperties(
+            PropertyFactory.heatmapWeight(Expression.get("weight")),
+            PropertyFactory.heatmapRadius((options?.radius ?? 30).toDouble()),
+            PropertyFactory.heatmapOpacity((options?.opacity ?? 0.6).toDouble())
+        )
+        style.addLayer(layer)
+        heatmapLayerRef = layer
+    } catch (e: any) {
+        console.error("TDTMap: 添加热力图层失败: " + e.message)
+        if (errorCb != null) errorCb({ code: 4, message: "添加热力图层失败: " + e.message })
+        removeHeatmap()
+    }
+}
+
+export function removeHeatmap(): void {
+    const style = mapLibreMap?.getStyle()
+    if (style != null) {
+        if (heatmapLayerRef != null) {
+            try { style.removeLayer(heatmapLayerRef) } catch (e: any) { /* ignore */ }
+        }
+        try { style.removeSource("tdt-heatmap-source") } catch (e: any) { /* ignore */ }
+    }
+    heatmapLayerRef = null
+    heatmapSourceRef = null
 }
