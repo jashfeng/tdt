@@ -170,3 +170,36 @@ export declare function enableRotate(enabled: boolean): void
 export declare function enableTilt(enabled: boolean): void
 // 相机移动事件：地图视野变化完成时触发，返回当前中心点坐标
 export declare function setCameraChangeCallback(callback: CameraChangeCallback): void
+
+// ═══ v1.7.0 新增：数据可视化（标记聚合 + 热力图）═══
+
+// 聚合选项：clusterRadius=聚合半径(像素,默认50)；clusterMaxZoom=最大聚合缩放级别(默认14，
+// 超过该级别聚合解散显示全部原始点；鸿蒙端官方聚合不支持自定义半径，仅 distance 固定 100vp)
+export type ClusterOptions = {
+    clusterRadius?: number
+    clusterMaxZoom?: number
+}
+
+// 热力点：weight 为权重（默认 1，越大热度越高）
+export type HeatmapItem = {
+    lat: number
+    lng: number
+    weight?: number
+}
+
+// 热力选项：radius=热力辐射半径(像素,默认30)；opacity=整体透明度(0~1,默认0.6)
+export type HeatmapOptions = {
+    radius?: number
+    opacity?: number
+}
+
+// 添加/更新标记聚合：海量 POI 场景下按缩放级别自动聚合显示（聚合簇显示数量徽标，点击聚合簇自动放大展开）。
+// 重复调用会先移除旧聚合层再重建（规避 MapLibre Android 已知 issue #3519 setGeoJson 竞态崩溃）。
+// 与 addMarker 互不影响（聚合使用独立 GeoJSON 图层，不占用 marker 体系）
+export declare function addMarkerCluster(points: Array<MapClickDetail>, options?: ClusterOptions): void
+// 移除标记聚合层
+export declare function removeMarkerCluster(): void
+// 添加/更新热力图：密度数据可视化。重复调用先移除旧热力层再重建
+export declare function addHeatmap(points: Array<HeatmapItem>, options?: HeatmapOptions): void
+// 移除热力层
+export declare function removeHeatmap(): void
