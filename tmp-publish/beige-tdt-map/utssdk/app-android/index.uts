@@ -1301,14 +1301,26 @@ export function geocode_getPoint(address: string, callback: GeocodeCallback): vo
     tiandituHttpRequest(url, callback)
 }
 
-function buildSearchUrl(params: SearchOptions): string {
+// v1.7.1: context7 实测（2026-08 服务器端 Key 直测）：v2/search 现支持多 queryType——
+// 12=行政区划(specify 必填)、3=周边(pointLonlat+queryRadius，无需 level)、
+// 2=视野内(mapBound+level 必填)、1=普通(level+mapBound 必填)。
+// v1.5.4 "仅 queryType=12 可用"结论已过时，周边/视野搜索恢复为专用 queryType；
+// 缺关键参数时回退 queryType=12 保持可用（向后兼容）
+function buildSearchUrl(params: SearchOptions, mode: string): string {
     const key = currentApiKey
-    // v1.5.4: 天地图老 /search 接口已下线（404 非 JSON 响应导致解析崩溃），
-    // 改用官方「地名搜索2.0」/v2/search（context7 实测验证）：
-    // queryType 必填且仅 12（行政区划搜索）可用；specify 必填（行政区国标码，默认 156000000=中国）；
-    // level/mapBound/queryRadius/pointLonlat 等 v1 参数 v2 不再支持，不再拼入 URL
-    const specify = params.specifyAdminCode != null && params.specifyAdminCode.length > 0 ? params.specifyAdminCode : '156000000'
-    let postJson = '{"keyWord":"' + params.keyWord + '","queryType":"12","specify":"' + specify + '"'
+    let postJson: string
+    if (mode === 'nearby' && params.pointLonlat != null && params.pointLonlat.length > 0) {
+        postJson = '{"keyWord":"' + params.keyWord + '","queryType":"3","pointLonlat":"' + params.pointLonlat + '"'
+        if (params.queryRadius != null && params.queryRadius.length > 0) {
+            postJson += ',"queryRadius":"' + params.queryRadius + '"'
+        }
+    } else if (mode === 'bounds' && params.mapBound != null && params.mapBound.length > 0) {
+        const level = params.level != null && params.level.length > 0 ? params.level : '12'
+        postJson = '{"keyWord":"' + params.keyWord + '","queryType":"2","mapBound":"' + params.mapBound + '","level":"' + level + '"'
+    } else {
+        const specify = params.specifyAdminCode != null && params.specifyAdminCode.length > 0 ? params.specifyAdminCode : '156000000'
+        postJson = '{"keyWord":"' + params.keyWord + '","queryType":"12","specify":"' + specify + '"'
+    }
     if (params.start != null && params.start.length > 0) {
         postJson += ',"start":"' + params.start + '"'
     }
@@ -1321,17 +1333,11 @@ function buildSearchUrl(params: SearchOptions): string {
 
 @UTSJS.keepAlive
 export function search(params: SearchOptions, callback: GeocodeCallback): void {
-    console.log("TDTMap: [DIAG] search 调用 keyWord=" + params.keyWord)
     if (currentApiKey.length == 0) {
-        console.error("TDTMap: [DIAG] search 失败：无 API Key")
         callback(new UTSJSONObject('{"status":"1","msg":"No API Key"}'))
         return
     }
-    // v1.5.5: 清理死代码——buildSearchUrl 已硬编码 queryType=12（v2 仅行政区划搜索可用），
-    // v1 遗留的 queryType 兜底赋值不再生效，直接传原始参数
-    const searchUrl = buildSearchUrl(params)
-    console.log("TDTMap: [DIAG] 搜索请求 URL 前80字符=" + searchUrl.substring(0, 80))
-    tiandituHttpRequest(searchUrl, callback)
+    tiandituHttpRequest(buildSearchUrl(params, 'search'), callback)
 }
 
 @UTSJS.keepAlive
@@ -1340,7 +1346,7 @@ export function searchInBounds(params: SearchOptions, callback: GeocodeCallback)
         callback(new UTSJSONObject('{"status":"1","msg":"No API Key"}'))
         return
     }
-    tiandituHttpRequest(buildSearchUrl(params), callback)
+    tiandituHttpRequest(buildSearchUrl(params, 'bounds'), callback)
 }
 
 @UTSJS.keepAlive
@@ -1349,7 +1355,7 @@ export function searchNearby(params: SearchOptions, callback: GeocodeCallback): 
         callback(new UTSJSONObject('{"status":"1","msg":"No API Key"}'))
         return
     }
-    tiandituHttpRequest(buildSearchUrl(params), callback)
+    tiandituHttpRequest(buildSearchUrl(params, 'nearby'), callback)
 }
 
 // ══════════════════════════════════════════════

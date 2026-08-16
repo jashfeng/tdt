@@ -569,6 +569,16 @@ export function addMarker(lat: number, lng: number, title: string, snippet?: str
             .setPopup(popup)
             .addTo(mapInstance)
 
+        // v1.7.1: 标记点击回调绑定——marker 为独立 DOM，click 不会冒泡到 canvas，
+        // 天然不触发 mapClick（与 Android 互斥消费语义一致）；闭包读模块级回调，
+        // 任意时机 setMarkerClickCallback 均对全部 marker 生效（含先添加的）
+        marker.getElement().addEventListener('click', () => {
+            if (markerClickCallback != null) {
+                const ll = marker.getLngLat()
+                markerClickCallback({ lat: ll.lat, lng: ll.lng })
+            }
+        })
+
         markerMap.set(id, marker)
         const entry: OverlayEntry = { type: 'marker', visible: true }
         overlayMap.set(id, entry)
@@ -719,6 +729,9 @@ export function addLabel(lat: number, lng: number, text: string): number {
             .setLngLat([lng, lat])
             .setPopup(new mlg.Popup().setText(text))
             .addTo(mapInstance)
+        // v1.7.1: 立即打开 popup 显示文字——原生端 addLabel 为直接可见的文字标注，
+        // popup 默认关闭时文字不可见，与 Android/iOS 语义不一致（context7: MapLibre Marker popup 默认关闭）
+        marker.togglePopup()
         markerMap.set(id, marker)
         overlayMap.set(id, { type: 'label', visible: true })
     } catch (e: any) {
@@ -821,16 +834,8 @@ export function clearOverlays(): void {
 @UTSJS.keepAlive
 export function setMarkerClickCallback(callback: MarkerClickCallback): void {
     markerClickCallback = callback
-    // 为已存在的 marker 绑定 click（新 marker 在 addMarker 中绑定）
-    markerMap.forEach((marker, id) => {
-        const el = marker.getElement()
-        if (el != null && callback != null) {
-            el.addEventListener('click', () => {
-                const lngLat = marker.getLngLat()
-                callback({ lat: lngLat.lat, lng: lngLat.lng })
-            })
-        }
-    })
+    // v1.7.1: 仅更新回调引用，不再遍历绑定——addMarker 已为每个 marker 绑定
+    // 内部 listener（闭包读模块级回调），重复绑定会双重触发
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -939,27 +944,44 @@ function tdtHttpRequest(endpoint: string, params: Map<string, string>, callback:
 @UTSJS.keepAlive
 export function geocode_getLocation(lnglat: MapClickDetail, callback: GeocodeCallback): void {
     const params = new Map<string, string>()
-    params.set('lon', lnglat.lng.toString())
-    params.set('lat', lnglat.lat.toString())
-    params.set('ver', '1')
+    // v1.7.1: 实测平铺参数（lon=&lat=&ver=1）返回 400 参数格式错误；
+    // 官方格式为 postStr JSON + type=geocode（context7: lbs.tianditu.gov.cn geocoder 文档，与 Android/iOS 一致）
+    const postStr = "{'lon':" + lnglat.lng.toString() + ",'lat':" + lnglat.lat.toString() + ",'ver':1}"
+    params.set('postStr', postStr)
+    params.set('type', 'geocode')
     tdtHttpRequest('/geocoder', params, callback)
 }
 
 @UTSJS.keepAlive
 export function geocode_getPoint(address: string, callback: GeocodeCallback): void {
     const params = new Map<string, string>()
-    params.set('address', address)
-    params.set('ver', '1')
+    // v1.7.1: 实测 address 平铺参数返回 400 参数格式错误；
+    // 官方格式为 ds={"keyWord":...}（context7 实测，与 Android/iOS 一致）
+    const ds = '{"keyWord":"' + address + '"}'
+    params.set('ds', ds)
     tdtHttpRequest('/geocoder', params, callback)
 }
 
-function buildSearchParams(opt: SearchOptions): Map<string, string> {
+// v1.7.1: context7 实测（2026-08 服务器端 Key 直测）：v2/search 现支持多 queryType——
+// 12=行政区划(specify 必填)、3=周边(pointLonlat+queryRadius，无需 level)、
+// 2=视野内(mapBound+level 必填)、1=普通(level+mapBound 必填)。
+// v1.5.4 "仅 queryType=12 可用"结论已过时，周边/视野搜索恢复为专用 queryType；
+// 缺关键参数时回退 queryType=12 保持可用（向后兼容）
+function buildSearchParams(opt: SearchOptions, mode: string): Map<string, string> {
     const params = new Map<string, string>()
-    // v1.5.4: 天地图老 /search 接口已下线（404），改用官方「地名搜索2.0」/v2/search：
-    // queryType 必填且仅 12（行政区划搜索）可用；specify 必填（行政区国标码，默认 156000000=中国）；
-    // postStr 为 JSON 字符串整体传参（v2 接口不再接受 keyWord/mapBound 等平铺 query 参数）
-    const specify = opt.specifyAdminCode != null && opt.specifyAdminCode.length > 0 ? opt.specifyAdminCode : '156000000'
-    let postJson = '{"keyWord":"' + opt.keyWord + '","queryType":"12","specify":"' + specify + '"'
+    let postJson: string
+    if (mode === 'nearby' && opt.pointLonlat != null && opt.pointLonlat.length > 0) {
+        postJson = '{"keyWord":"' + opt.keyWord + '","queryType":"3","pointLonlat":"' + opt.pointLonlat + '"'
+        if (opt.queryRadius != null && opt.queryRadius.length > 0) {
+            postJson += ',"queryRadius":"' + opt.queryRadius + '"'
+        }
+    } else if (mode === 'bounds' && opt.mapBound != null && opt.mapBound.length > 0) {
+        const level = opt.level != null && opt.level.length > 0 ? opt.level : '12'
+        postJson = '{"keyWord":"' + opt.keyWord + '","queryType":"2","mapBound":"' + opt.mapBound + '","level":"' + level + '"'
+    } else {
+        const specify = opt.specifyAdminCode != null && opt.specifyAdminCode.length > 0 ? opt.specifyAdminCode : '156000000'
+        postJson = '{"keyWord":"' + opt.keyWord + '","queryType":"12","specify":"' + specify + '"'
+    }
     if (opt.start != null) postJson += ',"start":"' + opt.start + '"'
     if (opt.count != null) postJson += ',"count":"' + opt.count + '"'
     postJson += '}'
@@ -970,19 +992,17 @@ function buildSearchParams(opt: SearchOptions): Map<string, string> {
 
 @UTSJS.keepAlive
 export function search(params: SearchOptions, callback: GeocodeCallback): void {
-    tdtHttpRequest('/v2/search', buildSearchParams(params), callback)
+    tdtHttpRequest('/v2/search', buildSearchParams(params, 'search'), callback)
 }
 
 @UTSJS.keepAlive
 export function searchInBounds(params: SearchOptions, callback: GeocodeCallback): void {
-    const p = buildSearchParams(params)
-    tdtHttpRequest('/v2/search', p, callback)
+    tdtHttpRequest('/v2/search', buildSearchParams(params, 'bounds'), callback)
 }
 
 @UTSJS.keepAlive
 export function searchNearby(params: SearchOptions, callback: GeocodeCallback): void {
-    const p = buildSearchParams(params)
-    tdtHttpRequest('/v2/search', p, callback)
+    tdtHttpRequest('/v2/search', buildSearchParams(params, 'nearby'), callback)
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -1052,7 +1072,12 @@ export function showMarkerInfo(id: number): void {
 export function hideMarkerInfo(id: number): void {
     const marker = markerMap.get(id)
     if (marker != null) {
-        try { marker.togglePopup() } catch (e) { /* ignore */ }
+        try {
+            // v1.7.1: togglePopup 是状态切换——popup 已关闭时调用会反而打开；
+            // 关闭语义必须用 popup.remove()（context7: MapLibre GL JS Marker API）
+            const popup = marker.getPopup()
+            if (popup != null) popup.remove()
+        } catch (e) { /* ignore */ }
     }
 }
 

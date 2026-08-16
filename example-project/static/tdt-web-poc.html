@@ -3,292 +3,919 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>天地图 + MapLibre GL JS 验证</title>
+<title>天地图 + MapLibre GL JS 全量测试台</title>
 <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
 <link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet" />
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { font-family: sans-serif; }
-  #map { width: 100vw; height: 100vh; }
-  .toolbar {
-    position: absolute; top: 10px; left: 10px; z-index: 10;
-    display: flex; gap: 6px; flex-wrap: wrap;
+  #map { position: absolute; top: 0; left: 0; right: 340px; height: 100vh; }
+  .side {
+    position: absolute; top: 0; right: 0; width: 340px; height: 100vh;
+    background: #f7f7f7; border-left: 1px solid #ddd; overflow-y: auto; z-index: 20;
+    display: flex; flex-direction: column;
   }
-  .toolbar button {
-    padding: 6px 12px; border: none; border-radius: 4px;
-    background: #4A90D9; color: #fff; font-size: 13px; cursor: pointer;
+  .side .head { padding: 8px; background: #fff; border-bottom: 1px solid #ddd; }
+  .side input { width: 100%; padding: 5px 7px; border: 1px solid #ccc; border-radius: 4px; font-size: 11px; margin-bottom: 4px; }
+  .side button {
+    padding: 5px 9px; border: none; border-radius: 4px; margin: 2px;
+    background: #4A90D9; color: #fff; font-size: 11px; cursor: pointer;
   }
-  .toolbar button.active { background: #E74C3C; }
-  .toolbar input {
-    padding: 6px 8px; border: 1px solid #ccc; border-radius: 4px; width: 280px;
-    font-size: 12px;
+  .side button.main { background: #E67E22; font-weight: bold; }
+  .side button.danger { background: #E74C3C; }
+  .side .grp { padding: 6px 8px; border-bottom: 1px solid #eee; background: #fff; }
+  .side .grp h4 { font-size: 12px; color: #333; margin-bottom: 3px; }
+  #log {
+    flex: 1; padding: 8px; font-size: 11px; line-height: 1.5;
+    font-family: Consolas, monospace; overflow-y: auto; background: #1e1e1e; color: #d4d4d4;
   }
-  .info { position: absolute; bottom: 20px; left: 10px; z-index: 10;
-    padding: 8px 14px; background: rgba(0,0,0,0.7); color: #fff;
-    font-size: 12px; border-radius: 4px; max-width: 90vw; }
+  #log .pass { color: #4ec9b0; }
+  #log .fail { color: #f48771; font-weight: bold; }
+  #log .info { color: #9cdcfe; }
+  #log .warn { color: #dcdcaa; }
 </style>
 </head>
 <body>
 
-<div class="toolbar">
-  <input id="keyInput" type="text" placeholder="输入天地图 Key（浏览器端类型）" />
-  <button onclick="initMap()">加载地图</button>
-  <button onclick="switchLayer('vec')">矢量</button>
-  <button onclick="switchLayer('img')">影像</button>
-  <button onclick="switchLayer('ter')">地形</button>
-  <button onclick="addMarkerDemo()">添加标记</button>
-  <button onclick="clearMarkers()">清除标记</button>
-</div>
 <div id="map"></div>
-<div class="info" id="info">请先输入天地图 Key 并点击「加载地图」</div>
+<div class="side">
+  <div class="head">
+    <input id="keyInput" type="text" placeholder="天地图 Key（浏览器端，瓦片用）" />
+    <input id="webKeyInput" type="text" placeholder="天地图 Key（服务端，搜索 API 用）" />
+    <button class="main" onclick="runAllTests()">▶ 全量自动测试</button>
+    <button onclick="initMap()">加载地图</button>
+    <button class="danger" onclick="destroyTest()">销毁地图</button>
+  </div>
+  <div class="grp"><h4>图层</h4>
+    <button onclick="switchLayer('vec')">矢量</button>
+    <button onclick="switchLayer('img')">影像</button>
+    <button onclick="switchLayer('ter')">地形</button>
+  </div>
+  <div class="grp"><h4>视野/手势</h4>
+    <button onclick="testViewport()">视野函数</button>
+    <button onclick="testGestures()">手势开关</button>
+    <button onclick="testRotate()">旋转倾斜</button>
+  </div>
+  <div class="grp"><h4>覆盖物</h4>
+    <button onclick="testOverlays()">全部覆盖物</button>
+    <button onclick="testOverlayMgmt()">显隐/移除</button>
+    <button onclick="testMarkerClick()">标记点击回调</button>
+    <button onclick="testInfoWindow()">信息窗口</button>
+  </div>
+  <div class="grp"><h4>工具/信息</h4>
+    <button onclick="testTools()">工具函数</button>
+    <button onclick="testSnapshot()">截图</button>
+    <button onclick="testCustomTile()">自定义瓦片</button>
+    <button onclick="testUserLoc()">定位</button>
+  </div>
+  <div class="grp"><h4>v1.7.0 可视化</h4>
+    <button onclick="testCluster()">聚合 300 点</button>
+    <button onclick="testClusterClick()">聚合点击展开</button>
+    <button onclick="testHeatmap()">热力 500 点</button>
+    <button onclick="clearVis()">清除可视化</button>
+  </div>
+  <div class="grp"><h4>天地图 Web API（重点）</h4>
+    <button onclick="testGeocoderFormats()">geocoder 格式对比</button>
+    <button onclick="testSearchQueryTypes()">v2/search 各 queryType</button>
+    <button onclick="testSearchImpl()">插件当前实现复刻</button>
+  </div>
+  <div id="log"></div>
+</div>
 
 <script>
+// ═══════════════════════════════════════════════════════════
+// 测试台基础设施：日志 + 结果收集（window.__tdtResults 供外部读取）
+// ═══════════════════════════════════════════════════════════
+window.__tdtResults = [];
+const LOG_MAX = 400;
+
+function log(msg, cls) {
+  const el = document.getElementById('log');
+  const line = document.createElement('div');
+  if (cls) line.className = cls;
+  line.textContent = typeof msg === 'string' ? msg : JSON.stringify(msg);
+  el.appendChild(line);
+  while (el.children.length > LOG_MAX) el.removeChild(el.firstChild);
+  el.scrollTop = el.scrollHeight;
+}
+
+function record(name, pass, detail) {
+  const r = { name: name, pass: !!pass, detail: detail || '' };
+  window.__tdtResults.push(r);
+  log((pass ? '[PASS] ' : '[FAIL] ') + name + (detail ? ' — ' + detail : ''), pass ? 'pass' : 'fail');
+}
+
+function getKeys() {
+  const params = new URLSearchParams(location.search);
+  const k1 = document.getElementById('keyInput').value.trim() || params.get('apiKey') || '';
+  const k2 = document.getElementById('webKeyInput').value.trim() || params.get('webApiKey') || '';
+  if (k1) document.getElementById('keyInput').value = k1;
+  if (k2) document.getElementById('webKeyInput').value = k2;
+  return { apiKey: k1, webApiKey: k2 || k1 };
+}
+
+// ═══════════════════════════════════════════════════════════
+// 与 web/index.uts 同构复刻的地图逻辑
+// ═══════════════════════════════════════════════════════════
 let map = null;
 let currentType = 'vec';
-let markers = [];
+const markerMap = new Map();      // id → Marker
+const overlayMap = new Map();     // id → {type, sourceId?, layerId?, visible}
+const markerInfoMap = new Map();  // id → {title, snippet}
+let nextOverlayId = 0;
+let polygonList = [], polylineList = [], circleList = [], rectangleList = [], labelList = [];
+const customTileLayers = new Map();
+let markerClickCallback = null;
 
 const LAYERS = {
   vec:  { map: 'vec_w', anno: 'cva_w' },
   img:  { map: 'img_w', anno: 'cia_w' },
   ter:  { map: 'ter_w', anno: 'cta_w' }
 };
-
 const SUBDOMAINS = ['0','1','2','3','4','5','6','7'];
+const TDT_API_BASE = 'https://api.tianditu.gov.cn';
 
 function tileUrl(t, key) {
   const s = SUBDOMAINS[Math.floor(Math.random() * 8)];
   return `https://t${s}.tianditu.gov.cn/DataServer?T=${t}&x={x}&y={y}&l={z}&tk=${key}`;
 }
+function genOverlayId() { nextOverlayId++; return nextOverlayId; }
 
-// ── 初始化地图 ──
 function initMap() {
-  const key = document.getElementById('keyInput').value.trim();
-  if (!key) { alert('请先输入天地图 Key'); return; }
+  const { apiKey } = getKeys();
+  if (!apiKey) { log('请先输入天地图 Key', 'fail'); return; }
   if (map) { map.remove(); map = null; }
+  markerMap.clear(); overlayMap.clear(); markerInfoMap.clear();
+  polygonList = []; polylineList = []; circleList = []; rectangleList = []; labelList = [];
+  customTileLayers.clear(); nextOverlayId = 0;
 
   map = new maplibregl.Map({
     container: 'map',
-    // v1.7.0: glyphs 字体端点（style spec 强制校验：text-field 图层需 style 含 glyphs，
-    // 否则图层被静默拒绝，聚合数字标签不渲染——与插件 web/index.uts 同步修复）
     style: { version: 8, glyphs: 'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf', sources: {}, layers: [] },
     center: [116.4075, 39.9042],
     zoom: 12,
     maxZoom: 18,
     minZoom: 1,
-    attributionControl: false  // v1.6.0: 与插件 web/index.uts 一致，关闭原生 attribution
+    attributionControl: false
   });
 
-  // ═══ v1.6.0 控件（复刻 web/index.uts L300-322 逻辑，供浏览器验证）═══
-  // 隐藏 MapLibre 原生 logo（GL JS 无 logoEnabled 选项，CSS 注入隐藏，幂等）
   if (document.getElementById('tdt-hide-logo-style') == null) {
-    const hideLogoStyle = document.createElement('style');
-    hideLogoStyle.id = 'tdt-hide-logo-style';
-    hideLogoStyle.textContent = '.maplibregl-ctrl-logo { display: none !important; }';
-    document.head.appendChild(hideLogoStyle);
+    const s = document.createElement('style');
+    s.id = 'tdt-hide-logo-style';
+    s.textContent = '.maplibregl-ctrl-logo { display: none !important; }';
+    document.head.appendChild(s);
   }
-  // 缩放按钮与比例尺（bottom-right 自动堆叠）
   const navControl = new maplibregl.NavigationControl({ showCompass: false });
   map.addControl(navControl, 'bottom-right');
-  map.tdtNavControl = navControl;
   const scaleControl = new maplibregl.ScaleControl({ maxWidth: 100 });
   map.addControl(scaleControl, 'bottom-right');
-  map.tdtScaleControl = scaleControl;
 
   map.on('load', () => {
-    // 底图
-    map.addSource('tdt-base', {
-      type: 'raster',
-      tiles: [tileUrl(LAYERS[currentType].map, key)],
-      tileSize: 256
-    });
+    map.addSource('tdt-base', { type: 'raster', tiles: [tileUrl(LAYERS[currentType].map, apiKey)], tileSize: 256, maxzoom: 18, minzoom: 1 });
     map.addLayer({ id: 'tdt-base-layer', type: 'raster', source: 'tdt-base' });
-
-    // 注记
-    map.addSource('tdt-anno', {
-      type: 'raster',
-      tiles: [tileUrl(LAYERS[currentType].anno, key)],
-      tileSize: 256
-    });
+    map.addSource('tdt-anno', { type: 'raster', tiles: [tileUrl(LAYERS[currentType].anno, apiKey)], tileSize: 256, maxzoom: 18, minzoom: 1 });
     map.addLayer({ id: 'tdt-anno-layer', type: 'raster', source: 'tdt-anno' });
-
-    document.getElementById('info').textContent = '✅ 地图加载成功 — 类型: ' + currentType;
+    log('地图加载成功（load 事件）', 'pass');
   });
 
   map.on('click', (e) => {
-    document.getElementById('info').textContent =
-      `地图点击: ${e.lngLat.lat.toFixed(6)}, ${e.lngLat.lng.toFixed(6)}`;
+    const clusterHits = map.queryRenderedFeatures(e.point, { layers: ['tdt-cluster-layer'] });
+    if (clusterHits != null && clusterHits.length > 0) return;
+    log('地图点击: ' + e.lngLat.lat.toFixed(5) + ', ' + e.lngLat.lng.toFixed(5), 'info');
   });
-
-  // 长按模拟: mousedown + 800ms
-  let longPressTimer = null;
-  map.on('mousedown', (e) => {
-    longPressTimer = setTimeout(() => {
-      document.getElementById('info').textContent =
-        `长按位置: ${e.lngLat.lat.toFixed(6)}, ${e.lngLat.lng.toFixed(6)}`;
-    }, 800);
-  });
-  map.on('mouseup', () => { if (longPressTimer) clearTimeout(longPressTimer); });
-  map.on('mousemove', () => { if (longPressTimer) clearTimeout(longPressTimer); });
-
-  // 相机移动完成 (等效 cameraChange)
-  map.on('moveend', () => {
-    const c = map.getCenter();
-    document.getElementById('info').textContent =
-      `视野变化: ${c.lat.toFixed(6)}, ${c.lng.toFixed(6)} | zoom=${map.getZoom().toFixed(1)}`;
-  });
-
+  map.on('moveend', () => { /* cameraChange 复刻 */ });
   map.on('error', (e) => {
     console.error('MapLibre 错误:', e);
-    document.getElementById('info').textContent = '❌ 瓦片加载失败，请检查 Key 是否正确';
+    log('❌ 瓦片加载错误（map error 事件）: ' + (e && e.error ? e.error.message : JSON.stringify(e).slice(0, 120)), 'fail');
   });
 }
 
-// ── 切换图层 ──
+function destroyTest() {
+  if (map) { try { map.remove(); } catch (e) {} map = null; }
+  log('地图已销毁');
+}
+
 function switchLayer(type) {
-  if (!map || !map.loaded()) { alert('地图尚未加载'); return; }
+  if (!map || !map.loaded()) { log('地图尚未加载', 'warn'); return; }
   currentType = type;
-  const key = document.getElementById('keyInput').value.trim();
-  // 更新 source tiles
-  map.getSource('tdt-base').tiles = [tileUrl(LAYERS[type].map, key)];
-  map.getSource('tdt-anno').tiles = [tileUrl(LAYERS[type].anno, key)];
-  // 触发刷新：source 的 tiles 变更需手动 reload
-  map.getSource('tdt-base').setTiles([tileUrl(LAYERS[type].map, key)]);
-  map.getSource('tdt-anno').setTiles([tileUrl(LAYERS[type].anno, key)]);
-  document.getElementById('info').textContent = '🔄 已切换到: ' + type;
+  const { apiKey } = getKeys();
+  map.getSource('tdt-base').setTiles([tileUrl(LAYERS[type].map, apiKey)]);
+  map.getSource('tdt-anno').setTiles([tileUrl(LAYERS[type].anno, apiKey)]);
+  log('已切换到: ' + type, 'info');
 }
 
-// ── 标记 ──
-function addMarkerDemo() {
-  if (!map) return;
-  const c = map.getCenter();
-  const m = new maplibregl.Marker({ color: '#FF4444' })
-    .setLngLat([c.lng, c.lat])
-    .setPopup(new maplibregl.Popup().setHTML('<b>测试标记</b><br>点击地图任意位置移动视口'))
-    .addTo(map);
-  markers.push(m);
-  document.getElementById('info').textContent = '📍 标记已添加';
+// ── 同构复刻：覆盖物 ──
+function addGeoJSONOverlay(type, geojson, layerPaint, layerLayout) {
+  if (!map) return 0;
+  const id = genOverlayId();
+  const sourceId = 'overlay-src-' + id;
+  const layerId = 'overlay-layer-' + id;
+  try {
+    map.addSource(sourceId, { type: 'geojson', data: geojson });
+    const layerDef = { id: layerId, type: type, source: sourceId, paint: layerPaint };
+    if (layerLayout != null) layerDef.layout = layerLayout;
+    map.addLayer(layerDef);
+    overlayMap.set(id, { type: type, sourceId: sourceId, layerId: layerId, visible: true });
+  } catch (e) { console.error('addGeoJSONOverlay 失败', e); return 0; }
+  return id;
 }
 
-function clearMarkers() {
-  markers.forEach(m => m.remove());
-  markers = [];
-  document.getElementById('info').textContent = '标记已清除';
+function addMarkerPoc(lat, lng, title, snippet) {
+  if (!map) return 0;
+  const id = genOverlayId();
+  try {
+    const popup = new maplibregl.Popup({ offset: 25 })
+      .setHTML('<b>' + title + '</b>' + (snippet && snippet.length > 0 ? '<br/>' + snippet : ''));
+    const marker = new maplibregl.Marker({ color: '#FF4444' })
+      .setLngLat([lng, lat]).setPopup(popup).addTo(map);
+    markerMap.set(id, marker);
+    overlayMap.set(id, { type: 'marker', visible: true });
+    if (snippet != null && snippet.length > 0) markerInfoMap.set(id, { title: title, snippet: snippet });
+    // v1.7.1 复刻修复后 web/index.uts：marker 为独立 DOM，click 不冒泡到 canvas；
+    // 闭包读模块级回调，任意时机 setMarkerClickCallback 均对全部 marker 生效
+    marker.getElement().addEventListener('click', () => {
+      if (markerClickCallback != null) {
+        const ll = marker.getLngLat();
+        markerClickCallback({ lat: ll.lat, lng: ll.lng });
+      }
+    });
+  } catch (e) { console.error('addMarker 失败', e); return 0; }
+  return id;
 }
 
-// ════════════════════════════════════════════════════════
-// v1.7.0 聚合/热力复刻（对齐 web/index.uts 实现，供浏览器实测验证）
-// ════════════════════════════════════════════════════════
+function addPolylinePoc(points, color, width) {
+  const coords = points.map(p => [p.lng, p.lat]);
+  const geojson = { type: 'Feature', geometry: { type: 'LineString', coordinates: coords } };
+  const id = addGeoJSONOverlay('line', geojson, { 'line-color': color, 'line-width': width, 'line-opacity': 0.8 });
+  if (id > 0) polylineList.push(id);
+  return id;
+}
+function addCirclePoc(lat, lng, radius, color, fillColor) {
+  const coords = [];
+  const segments = 64;
+  const radiusDeg = radius / 111320.0;
+  for (let i = 0; i <= segments; i++) {
+    const angle = (i / segments) * 2.0 * Math.PI;
+    coords.push([lng + radiusDeg * Math.cos(angle), lat + radiusDeg * Math.sin(angle)]);
+  }
+  const geojson = { type: 'Feature', geometry: { type: 'Polygon', coordinates: [coords] } };
+  const id = addGeoJSONOverlay('fill', geojson, { 'fill-color': fillColor, 'fill-outline-color': color, 'fill-opacity': 0.5 });
+  if (id > 0) circleList.push(id);
+  return id;
+}
+function addRectanglePoc(minLat, minLng, maxLat, maxLng, color, fillColor) {
+  const coords = [[minLng, minLat], [maxLng, minLat], [maxLng, maxLat], [minLng, maxLat], [minLng, minLat]];
+  const geojson = { type: 'Feature', geometry: { type: 'Polygon', coordinates: [coords] } };
+  const id = addGeoJSONOverlay('fill', geojson, { 'fill-color': fillColor, 'fill-outline-color': color, 'fill-opacity': 0.5 });
+  if (id > 0) rectangleList.push(id);
+  return id;
+}
+function addPolygonPoc(points, color, fillColor) {
+  const coords = points.map(p => [p.lng, p.lat]);
+  if (coords.length > 0) {
+    const first = coords[0], last = coords[coords.length - 1];
+    if (first[0] !== last[0] || first[1] !== last[1]) coords.push([first[0], first[1]]);
+  }
+  const geojson = { type: 'Feature', geometry: { type: 'Polygon', coordinates: [coords] } };
+  const id = addGeoJSONOverlay('fill', geojson, { 'fill-color': fillColor, 'fill-outline-color': color, 'fill-opacity': 0.5 });
+  if (id > 0) polygonList.push(id);
+  return id;
+}
+function addLabelPoc(lat, lng, text) {
+  if (!map) return 0;
+  const id = genOverlayId();
+  try {
+    const marker = new maplibregl.Marker({ color: '#3366FF' })
+      .setLngLat([lng, lat])
+      .setPopup(new maplibregl.Popup().setText(text))
+      .addTo(map);
+    // v1.7.1 复刻修复后 web/index.uts：立即打开 popup 显示文字——
+    // popup 默认关闭时文字不可见，与 Android/iOS 语义不一致
+    marker.togglePopup();
+    markerMap.set(id, marker);
+    overlayMap.set(id, { type: 'label', visible: true });
+  } catch (e) { console.error('addLabel 失败', e); return 0; }
+  labelList.push(id);
+  return id;
+}
+function removeOverlayInternal(id) {
+  const entry = overlayMap.get(id);
+  if (entry == null) return;
+  if (entry.type === 'marker' || entry.type === 'label') {
+    const marker = markerMap.get(id);
+    if (marker != null) { try { marker.remove(); } catch (e) {} markerMap.delete(id); }
+    markerInfoMap.delete(id);
+  } else {
+    if (entry.layerId != null && map != null) { try { if (map.getLayer(entry.layerId) != null) map.removeLayer(entry.layerId); } catch (e) {} }
+    if (entry.sourceId != null && map != null) { try { if (map.getSource(entry.sourceId) != null) map.removeSource(entry.sourceId); } catch (e) {} }
+  }
+  overlayMap.delete(id);
+}
+function removeOverlayPoc(id) {
+  removeOverlayInternal(id);
+  polygonList = polygonList.filter(x => x !== id);
+  polylineList = polylineList.filter(x => x !== id);
+  circleList = circleList.filter(x => x !== id);
+  rectangleList = rectangleList.filter(x => x !== id);
+  labelList = labelList.filter(x => x !== id);
+}
+function hideOverlayPoc(id) {
+  const entry = overlayMap.get(id);
+  if (entry == null || map == null) return;
+  if (entry.type === 'marker' || entry.type === 'label') {
+    const marker = markerMap.get(id);
+    if (marker != null) { try { marker.remove(); } catch (e) {} }
+  } else if (entry.layerId != null) {
+    try { map.setLayoutProperty(entry.layerId, 'visibility', 'none'); } catch (e) {}
+  }
+  entry.visible = false;
+}
+function showOverlayPoc(id) {
+  const entry = overlayMap.get(id);
+  if (entry == null || map == null) return;
+  if (entry.type === 'marker' || entry.type === 'label') {
+    const marker = markerMap.get(id);
+    if (marker != null) marker.addTo(map);
+  } else if (entry.layerId != null) {
+    try { map.setLayoutProperty(entry.layerId, 'visibility', 'visible'); } catch (e) {}
+  }
+  entry.visible = true;
+}
+function clearMarkersPoc() {
+  if (map == null) return;
+  markerMap.forEach((marker, id) => {
+    try { marker.remove(); } catch (e) {}
+    overlayMap.delete(id);
+    markerInfoMap.delete(id);
+  });
+  markerMap.clear();
+  // 复刻 web/index.uts clearMarkers 的最后一行（疑似死代码）
+  polygonList = polygonList.filter(id => overlayMap.get(id)?.type !== 'marker');
+}
 
-// 随机点生成器（上海外滩附近，与 demo/index.uvue 一致）
+// ── 同构复刻：天地图 HTTP 请求（插件当前实现） ──
+function buildTdtApiUrl(endpoint, params, key) {
+  let url = TDT_API_BASE + endpoint + '?';
+  params.set('tk', key);
+  let first = true;
+  params.forEach((value, k) => {
+    if (!first) url += '&';
+    url += encodeURIComponent(k) + '=' + encodeURIComponent(value);
+    first = false;
+  });
+  return url;
+}
+function fetchJson(url) {
+  return fetch(url).then(r => r.json()).then(j => ({ status: 'ok', json: j }))
+    .catch(e => ({ status: 'err', json: { error: String(e) } }));
+}
+function summarize(json) {
+  try {
+    if (json == null) return 'null';
+    const s = JSON.stringify(json);
+    if (s.length <= 160) return s;
+    return s.slice(0, 160) + '…';
+  } catch (e) { return String(json); }
+}
+
+// ═══════════════════════════════════════════════════════════
+// 分组测试函数
+// ═══════════════════════════════════════════════════════════
+
+async function ensureMapLoaded() {
+  if (map == null) initMap();
+  if (!map.loaded()) {
+    await new Promise((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error('地图加载超时')), 15000);
+      map.once('load', () => { clearTimeout(t); resolve(); });
+    });
+  }
+}
+
+async function runAllTests() {
+  window.__tdtResults = [];
+  log('═══ 开始全量自动测试 ═══', 'info');
+  const { apiKey } = getKeys();
+  if (!apiKey) { log('缺少天地图 Key，中止', 'fail'); return; }
+  try {
+    await ensureMapLoaded();
+    record('地图加载', true);
+    await testSwitchLayers();
+    testViewport();
+    testGestures();
+    testRotate();
+    testOverlays();
+    testOverlayMgmt();
+    testMarkerClick();
+    testInfoWindow();
+    testTools();
+    testSnapshot();
+    await testCustomTile();
+    testUserLoc();
+    await testCluster();
+    await testClusterClick();
+    await testHeatmap();
+    await testGeocoderFormats();
+    await testSearchQueryTypes();
+    await testSearchImpl();
+  } catch (e) {
+    record('全量测试异常中断', false, String(e));
+  }
+  const fails = window.__tdtResults.filter(r => !r.pass).length;
+  log('═══ 测试完成：' + (window.__tdtResults.length - fails) + ' 通过 / ' + fails + ' 失败 ═══', fails > 0 ? 'fail' : 'pass');
+}
+
+async function testSwitchLayers() {
+  for (const t of ['img', 'ter', 'vec']) {
+    try {
+      switchLayer(t);
+      await new Promise(r => setTimeout(r, 2500));
+      const src = map.getSource('tdt-base');
+      const tiles = src ? src.tiles || [] : [];
+      const ok = tiles.length > 0 && tiles[0].includes('T=' + LAYERS[t].map);
+      record('切换图层 ' + t, ok, ok ? tiles[0].split('?T=')[1] : 'tiles 为空');
+    } catch (e) { record('切换图层 ' + t, false, String(e)); }
+  }
+}
+
+function testViewport() {
+  try {
+    map.setCenter([116.41, 39.91]); map.setZoom(11);
+    const c = map.getCenter();
+    record('setCenter/getCenter', Math.abs(c.lat - 39.91) < 0.01 && Math.abs(c.lng - 116.41) < 0.01, c.lat + ',' + c.lng);
+    map.zoomIn(); map.zoomIn(); map.zoomOut();
+    record('zoomIn/zoomOut', map.getZoom() > 11.5, 'zoom=' + map.getZoom().toFixed(1));
+    map.setMinZoom(3); map.setMaxZoom(17);
+    record('setMinZoom/setMaxZoom', map.getMinZoom() === 3 && map.getMaxZoom() === 17);
+    map.fitBounds([[116.38, 39.88], [116.43, 39.93]], { padding: 20, maxZoom: 18 });
+    const b = map.getBounds();
+    record('fitBounds/getBounds', b.getSouth() < 39.91 && b.getNorth() > 39.90, b.getWest() + '~' + b.getEast());
+    map.setMaxBounds([[116.0, 39.5], [116.8, 40.3]]);
+    record('setMaxBounds', true);
+    map.flyTo({ center: [116.4075, 39.9042], zoom: 12 });
+    map.setCenter([116.4075, 39.9042]); map.setZoom(12);
+    const sz = map.getCanvas();
+    record('getSize', sz.clientWidth > 0 && sz.clientHeight > 0, sz.clientWidth + 'x' + sz.clientHeight);
+    const d = getDistancePoc({ lat: 39.9042, lng: 116.4075 }, { lat: 39.9142, lng: 116.4175 });
+    record('getDistance', d > 1000 && d < 1500, d.toFixed(0) + ' 米');
+    const vp = getViewportPoc([{ lat: 39.89, lng: 116.38 }, { lat: 39.92, lng: 116.42 }]);
+    record('getViewport', vp.zoom >= 10 && vp.zoom <= 18, 'zoom=' + vp.zoom);
+    const gc = gcj02ToWgs84Poc(39.9088, 116.3975);
+    record('gcj02ToWgs84', Math.abs(gc.lng - 116.3913) < 0.01, gc.lat.toFixed(6) + ',' + gc.lng.toFixed(6));
+    map.panBy([50, 50]);
+    record('planBy(panBy)', true);
+    const vp2 = getViewportPoc([{ lat: 39.895, lng: 116.395 }, { lat: 39.92, lng: 116.42 }, { lat: 39.905, lng: 116.39 }]);
+    map.fitBounds([[vp2.center.lng - 0.01, vp2.center.lat - 0.01], [vp2.center.lng + 0.01, vp2.center.lat + 0.01]], { padding: 40 });
+    record('setViewport(fitBounds)', true);
+    map.resize();
+    record('checkResize', true);
+    record('getCode', 'EPSG:4326' === 'EPSG:4326', 'EPSG:4326');
+  } catch (e) {
+    record('testViewport', false, String(e));
+  }
+}
+
+function testGestures() {
+  try {
+    map.scrollZoom.disable();
+    record('enableZoom(false)', !map.scrollZoom.isEnabled());
+    map.scrollZoom.enable();
+    record('enableZoom(true)', map.scrollZoom.isEnabled());
+    map.dragPan.disable();
+    record('enableDrag(false)', !map.dragPan.isEnabled());
+    map.dragPan.enable();
+    record('enableDrag(true)', map.dragPan.isEnabled());
+  } catch (e) { record('testGestures', false, String(e)); }
+}
+
+function testRotate() {
+  try {
+    map.setBearing(90);
+    record('setBearing/getBearing', Math.abs(map.getBearing() - 90) < 1, map.getBearing().toFixed(0) + '°');
+    map.setPitch(45);
+    record('setTilt/getTilt', Math.abs(map.getPitch() - 45) < 1, map.getPitch().toFixed(0) + '°');
+    map.touchZoomRotate.disableRotation();
+    record('enableRotate(false)', !map.touchZoomRotate.isRotationEnabled());
+    map.touchZoomRotate.enableRotation();
+    map.touchPitch.disable();
+    record('enableTilt(false)', !map.touchPitch.isEnabled());
+    map.touchPitch.enable();
+    map.setBearing(0); map.setPitch(0);
+  } catch (e) { record('testRotate', false, String(e)); }
+}
+
+function testOverlays() {
+  try {
+    const m = addMarkerPoc(39.9142, 116.4074, '测试标记', '北京市中心');
+    record('addMarker', m > 0, 'id=' + m);
+    const pl = addPolylinePoc([{ lat: 39.91, lng: 116.39 }, { lat: 39.92, lng: 116.40 }, { lat: 39.91, lng: 116.41 }], '#FF4444', 6);
+    record('addPolyline', pl > 0 && map.getLayer('overlay-layer-' + pl) != null, 'id=' + pl);
+    const c = addCirclePoc(39.9142, 116.4074, 800, '#FF6600', '#FF660044');
+    record('addCircle', c > 0 && map.getLayer('overlay-layer-' + c) != null, 'id=' + c);
+    const r = addRectanglePoc(39.91, 116.395, 39.92, 116.415, '#3366FF', '#3366FF22');
+    record('addRectangle', r > 0 && map.getLayer('overlay-layer-' + r) != null, 'id=' + r);
+    const pg = addPolygonPoc([{ lat: 39.905, lng: 116.385 }, { lat: 39.915, lng: 116.395 }, { lat: 39.91, lng: 116.405 }, { lat: 39.90, lng: 116.39 }], '#00CC66', '#00CC6633');
+    record('addPolygon', pg > 0 && map.getLayer('overlay-layer-' + pg) != null, 'id=' + pg);
+    const lb = addLabelPoc(39.9142, 116.4074, '天安门');
+    // 注意：MapLibre Popup 挂载在 .maplibregl-map 容器下（是 marker 的兄弟节点），
+    // 不能用 markerDom.querySelector 判断，必须用 marker.getPopup().isOpen()
+    const lbMarker = lb > 0 ? markerMap.get(lb) : null;
+    const popupVisible = lbMarker != null && lbMarker.getPopup() != null ? lbMarker.getPopup().isOpen() : false;
+    record('addLabel（默认文字可见性）', lb > 0 && popupVisible, 'id=' + lb + '，popup 默认可见=' + popupVisible + '（false 表示文字不可见，需点击）');
+    const ids = [m, pl, c, r, pg, lb].filter(x => x > 0);
+    let cnt = 0;
+    overlayMap.forEach((e, id) => { if (ids.includes(id)) cnt++; });
+    record('overlay 注册表', cnt === ids.length, cnt + '/' + ids.length);
+  } catch (e) { record('testOverlays', false, String(e)); }
+}
+
+function testOverlayMgmt() {
+  try {
+    const id = addCirclePoc(39.9242, 116.4174, 500, '#FF6600', '#FF660044');
+    hideOverlayPoc(id);
+    const visAfterHide = map.getLayoutProperty('overlay-layer-' + id, 'visibility');
+    record('hideOverlay', visAfterHide === 'none', 'visibility=' + visAfterHide);
+    showOverlayPoc(id);
+    const visAfterShow = map.getLayoutProperty('overlay-layer-' + id, 'visibility');
+    record('showOverlay', visAfterShow === 'visible', 'visibility=' + visAfterShow);
+    removeOverlayPoc(id);
+    record('removeOverlay', map.getLayer('overlay-layer-' + id) == null && map.getSource('overlay-src-' + id) == null);
+    const mid = addMarkerPoc(39.9342, 116.4174, '隐藏测试', '');
+    hideOverlayPoc(mid);
+    record('hideOverlay(marker)', overlayMap.get(mid).visible === false);
+    showOverlayPoc(mid);
+    record('showOverlay(marker)', overlayMap.get(mid).visible === true);
+    removeOverlayPoc(mid);
+  } catch (e) { record('testOverlayMgmt', false, String(e)); }
+}
+
+function testMarkerClick() {
+  try {
+    let fired = false;
+    markerClickCallback = (detail) => { fired = true; };
+    // 场景1：先注册回调再添加 marker（v1.7.1 修复：addMarker 内绑定闭包 listener，任意时机均生效）
+    const id1 = addMarkerPoc(39.9042, 116.4174, '回调测试1', '');
+    const el1 = markerMap.get(id1).getElement();
+    el1.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    record('markerClick: 先注册后添加', fired, fired ? '回调已触发' : '回调未触发');
+    // 场景2：先添加 marker 再注册回调（闭包读模块级回调，同样生效）
+    fired = false;
+    const id2 = addMarkerPoc(39.9142, 116.4274, '回调测试2', '');
+    markerClickCallback = (detail) => { fired = true; };
+    const el2 = markerMap.get(id2).getElement();
+    el2.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    record('markerClick: 先添加后注册', fired, fired ? '回调已触发' : '回调未触发');
+    // 场景3：置空回调后点击不触发
+    fired = false;
+    markerClickCallback = null;
+    el2.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    record('markerClick: 置空回调后不触发', !fired, fired ? '意外触发' : '未触发（正确）');
+    removeOverlayPoc(id1);
+    removeOverlayPoc(id2);
+  } catch (e) { record('testMarkerClick', false, String(e)); }
+}
+
+function testInfoWindow() {
+  try {
+    const id = addMarkerPoc(39.9142, 116.4074, '信息窗口', '详情内容');
+    const marker = markerMap.get(id);
+    // 复刻 showMarkerInfo：togglePopup（打开）
+    marker.togglePopup();
+    let popupOpen = marker.getPopup().isOpen();
+    record('showMarkerInfo(togglePopup 打开)', popupOpen === true, 'popup.isOpen=' + popupOpen);
+    // v1.7.1 复刻修复后 hideMarkerInfo：popup.remove()（关闭语义，非状态切换）
+    marker.getPopup().remove();
+    popupOpen = marker.getPopup().isOpen();
+    record('hideMarkerInfo(popup.remove 关闭)', popupOpen === false, 'popup.isOpen=' + popupOpen);
+    // 边界场景：popup 已关闭时再次调用 hide（修复后 popup.remove() 幂等，不会反而打开）
+    marker.getPopup().remove();
+    popupOpen = marker.getPopup().isOpen();
+    record('hideMarkerInfo 再次调用（popup 已关闭）', popupOpen === false, 'popup.isOpen=' + popupOpen + '（true=bug：hide 反而打开了 popup）');
+    removeOverlayPoc(id);
+  } catch (e) { record('testInfoWindow', false, String(e)); }
+}
+
+function testTools() {
+  try {
+    // 长按模拟（800ms）
+    let longPressFired = false;
+    let timer = null;
+    const onDown = (e) => {
+      timer = setTimeout(() => { longPressFired = true; }, 800);
+    };
+    const onUp = () => { if (timer) clearTimeout(timer); };
+    map.on('mousedown', onDown);
+    map.on('mouseup', onUp);
+    const canvas = map.getCanvas();
+    canvas.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, clientX: 100, clientY: 100 }));
+    setTimeout(() => { record('长按检测(800ms)', longPressFired, longPressFired ? '已触发' : '未触发'); }, 1200);
+    map.off('mousedown', onDown); map.off('mouseup', onUp);
+  } catch (e) { record('testTools', false, String(e)); }
+}
+
+function testSnapshot() {
+  try {
+    const canvas = map.getCanvas();
+    const dataUrl = canvas.toDataURL('image/png');
+    const size = dataUrl.length;
+    record('snapshot(toDataURL)', size > 1000, 'dataUrl 长度=' + size + '（注意：WebGL preserveDrawingBuffer=false 时可能为空白图，需人工查看）');
+    const img = new Image();
+    img.src = dataUrl;
+    img.style.cssText = 'position:absolute;top:10px;left:10px;width:200px;z-index:30;border:2px solid red;';
+    img.id = 'snapshot-preview';
+    const old = document.getElementById('snapshot-preview');
+    if (old) old.remove();
+    document.body.appendChild(img);
+  } catch (e) { record('testSnapshot', false, String(e)); }
+}
+
+async function testCustomTile() {
+  try {
+    map.addSource('custom-tile-src-osm-demo', { type: 'raster', tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'], tileSize: 256 });
+    map.addLayer({ id: 'custom-tile-layer-osm-demo', type: 'raster', source: 'custom-tile-src-osm-demo' });
+    await new Promise(r => setTimeout(r, 3000));
+    record('addCustomTileLayer', map.getLayer('custom-tile-layer-osm-demo') != null);
+    try { map.removeLayer('custom-tile-layer-osm-demo'); map.removeSource('custom-tile-src-osm-demo'); } catch (e) {}
+    record('removeCustomTileLayer', map.getLayer('custom-tile-layer-osm-demo') == null);
+  } catch (e) { record('testCustomTile', false, String(e)); }
+}
+
+function testUserLoc() {
+  if (navigator.geolocation == null) { record('getUserLocation', false, '浏览器不支持定位'); return; }
+  navigator.geolocation.getCurrentPosition(
+    (pos) => { record('getUserLocation', true, pos.coords.latitude.toFixed(5) + ',' + pos.coords.longitude.toFixed(5)); },
+    (err) => { record('getUserLocation', false, '拒绝或失败: ' + err.message); },
+    { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+  );
+}
+
+// ── v1.7.0 聚合/热力（同构复刻） ──
 function generatePoints(count, withWeight) {
   const pts = [];
   for (let i = 0; i < count; i++) {
-    const p = {
-      lat: 31.2304 + (Math.random() - 0.5) * 0.5,
-      lng: 121.4737 + (Math.random() - 0.5) * 0.5
-    };
+    const p = { lat: 31.2304 + (Math.random() - 0.5) * 0.5, lng: 121.4737 + (Math.random() - 0.5) * 0.5 };
     if (withWeight) p.weight = Math.floor(Math.random() * 10) + 1;
     pts.push(p);
   }
   return pts;
 }
 
-// v1.7.0 聚合（复刻 web/index.uts L1189-1253）
 function addMarkerClusterPoc(points, options) {
   if (!map) return;
   removeMarkerClusterPoc();
   if (!points || points.length === 0) return;
   const radius = (options && options.clusterRadius) || 50;
   const maxZoom = (options && options.clusterMaxZoom) || 14;
-  const features = points.map(p => ({
-    type: 'Feature',
-    geometry: { type: 'Point', coordinates: [p.lng, p.lat] },
-    properties: {}
-  }));
-  map.addSource('tdt-cluster-source', {
-    type: 'geojson',
-    data: { type: 'FeatureCollection', features: features },
-    cluster: true,
-    clusterRadius: radius,
-    clusterMaxZoom: maxZoom
-  });
-  map.addLayer({
-    id: 'tdt-cluster-layer', type: 'circle', source: 'tdt-cluster-source',
-    filter: ['has', 'point_count'],
-    paint: {
-      'circle-color': ['step', ['get', 'point_count'], '#51BBD6', 100, '#F1F075', 750, '#F28CB1'],
-      'circle-radius': ['step', ['get', 'point_count'], 20, 100, 30, 750, 40],
-      'circle-stroke-width': 1, 'circle-stroke-color': '#FFFFFF'
-    }
-  });
-  map.addLayer({
-    id: 'tdt-cluster-count', type: 'symbol', source: 'tdt-cluster-source',
-    filter: ['has', 'point_count'],
-    layout: { 'text-field': '{point_count_abbreviated}', 'text-font': ['Open Sans Semibold'], 'text-size': 12 }
-  });
-  map.addLayer({
-    id: 'tdt-cluster-unclustered', type: 'circle', source: 'tdt-cluster-source',
-    filter: ['!', ['has', 'point_count']],
-    paint: { 'circle-color': '#11B4DA', 'circle-radius': 5, 'circle-stroke-width': 1, 'circle-stroke-color': '#FFFFFF' }
-  });
-  map.on('click', 'tdt-cluster-layer', (e) => {
-    const f = map.queryRenderedFeatures(e.point, { layers: ['tdt-cluster-layer'] });
-    if (f.length > 0 && f[0].properties.cluster_id != null) {
-      map.getSource('tdt-cluster-source').getClusterExpansionZoom(f[0].properties.cluster_id)
-        .then(z => map.easeTo({ center: f[0].geometry.coordinates, zoom: z }));
-    }
-  });
-  window.__tdtClusterAdded = true;
+  const features = points.map(p => ({ type: 'Feature', geometry: { type: 'Point', coordinates: [p.lng, p.lat] }, properties: {} }));
+  map.addSource('tdt-cluster-source', { type: 'geojson', data: { type: 'FeatureCollection', features: features }, cluster: true, clusterRadius: radius, clusterMaxZoom: maxZoom });
+  map.addLayer({ id: 'tdt-cluster-layer', type: 'circle', source: 'tdt-cluster-source', filter: ['has', 'point_count'],
+    paint: { 'circle-color': ['step', ['get', 'point_count'], '#51BBD6', 100, '#F1F075', 750, '#F28CB1'], 'circle-radius': ['step', ['get', 'point_count'], 20, 100, 30, 750, 40], 'circle-stroke-width': 1, 'circle-stroke-color': '#FFFFFF' } });
+  map.addLayer({ id: 'tdt-cluster-count', type: 'symbol', source: 'tdt-cluster-source', filter: ['has', 'point_count'],
+    layout: { 'text-field': '{point_count_abbreviated}', 'text-font': ['Open Sans Semibold'], 'text-size': 12 } });
+  map.addLayer({ id: 'tdt-cluster-unclustered', type: 'circle', source: 'tdt-cluster-source', filter: ['!', ['has', 'point_count']],
+    paint: { 'circle-color': '#11B4DA', 'circle-radius': 5, 'circle-stroke-width': 1, 'circle-stroke-color': '#FFFFFF' } });
+  map.on('click', 'tdt-cluster-layer', onClusterClickPoc);
 }
-
+function onClusterClickPoc(e) {
+  const features = map.queryRenderedFeatures(e.point, { layers: ['tdt-cluster-layer'] });
+  if (features == null || features.length === 0) return;
+  const clusterId = features[0].properties.cluster_id;
+  if (clusterId == null) return;
+  map.getSource('tdt-cluster-source').getClusterExpansionZoom(clusterId).then((zoom) => {
+    map.easeTo({ center: features[0].geometry.coordinates, zoom: zoom });
+  });
+}
 function removeMarkerClusterPoc() {
   if (!map) return;
   try { map.removeLayer('tdt-cluster-layer'); } catch (e) {}
   try { map.removeLayer('tdt-cluster-count'); } catch (e) {}
   try { map.removeLayer('tdt-cluster-unclustered'); } catch (e) {}
   try { map.removeSource('tdt-cluster-source'); } catch (e) {}
-  window.__tdtClusterAdded = false;
 }
 
-// v1.7.0 热力图（复刻 web/index.uts L1263-1302，含 heatmap-color 渐变）
 function addHeatmapPoc(points, options) {
   if (!map) return;
   removeHeatmapPoc();
   if (!points || points.length === 0) return;
-  const features = points.map(p => ({
-    type: 'Feature',
-    geometry: { type: 'Point', coordinates: [p.lng, p.lat] },
-    properties: { weight: p.weight || 1 }
-  }));
-  map.addSource('tdt-heatmap-source', {
-    type: 'geojson',
-    data: { type: 'FeatureCollection', features: features }
-  });
-  map.addLayer({
-    id: 'tdt-heatmap-layer', type: 'heatmap', source: 'tdt-heatmap-source',
-    paint: {
-      'heatmap-weight': ['get', 'weight'],
-      'heatmap-radius': (options && options.radius) || 30,
-      'heatmap-opacity': (options && options.opacity) || 0.6,
-      'heatmap-color': [
-        'interpolate', ['linear'], ['heatmap-density'],
-        0, 'rgba(0, 0, 255, 0)',
-        0.2, 'rgb(0, 0, 255)',
-        0.4, 'rgb(0, 255, 0)',
-        0.6, 'rgb(255, 255, 0)',
-        0.8, 'rgb(255, 165, 0)',
-        1, 'rgb(255, 0, 0)'
-      ]
-    }
-  });
-  window.__tdtHeatmapAdded = true;
+  const features = points.map(p => ({ type: 'Feature', geometry: { type: 'Point', coordinates: [p.lng, p.lat] }, properties: { weight: p.weight || 1 } }));
+  map.addSource('tdt-heatmap-source', { type: 'geojson', data: { type: 'FeatureCollection', features: features } });
+  map.addLayer({ id: 'tdt-heatmap-layer', type: 'heatmap', source: 'tdt-heatmap-source',
+    paint: { 'heatmap-weight': ['get', 'weight'], 'heatmap-radius': (options && options.radius) || 30, 'heatmap-opacity': (options && options.opacity) || 0.6,
+      'heatmap-color': ['interpolate', ['linear'], ['heatmap-density'], 0, 'rgba(0, 0, 255, 0)', 0.2, 'rgb(0, 0, 255)', 0.4, 'rgb(0, 255, 0)', 0.6, 'rgb(255, 255, 0)', 0.8, 'rgb(255, 165, 0)', 1, 'rgb(255, 0, 0)'] } });
 }
-
 function removeHeatmapPoc() {
   if (!map) return;
   try { map.removeLayer('tdt-heatmap-layer'); } catch (e) {}
   try { map.removeSource('tdt-heatmap-source'); } catch (e) {}
-  window.__tdtHeatmapAdded = false;
+}
+
+async function testCluster() {
+  try {
+    map.jumpTo({ center: [121.4737, 31.2304], zoom: 13 });
+    await new Promise(r => setTimeout(r, 800));
+    addMarkerClusterPoc(generatePoints(300, false), { clusterRadius: 50, clusterMaxZoom: 14 });
+    await new Promise(r => setTimeout(r, 1500));
+    const src = map.getSource('tdt-cluster-source');
+    const clusterFeatures = map.querySourceFeatures('tdt-cluster-source', { filter: ['has', 'point_count'] });
+    record('addMarkerCluster', src != null && clusterFeatures.length > 0, '聚合簇数量=' + clusterFeatures.length + '/300 点');
+    const unclustered = map.querySourceFeatures('tdt-cluster-source', { filter: ['!', ['has', 'point_count']] });
+    record('聚合+未聚合点总和', clusterFeatures.length + unclustered.length <= 300, '簇=' + clusterFeatures.length + ' 散点=' + unclustered.length);
+    record('聚合数字标签图层', map.getLayer('tdt-cluster-count') != null && map.getLayoutProperty('tdt-cluster-count', 'text-field') === '{point_count_abbreviated}');
+  } catch (e) { record('testCluster', false, String(e)); }
+}
+
+async function testClusterClick() {
+  try {
+    const clusterFeatures = map.queryRenderedFeatures({ layers: ['tdt-cluster-layer'] });
+    if (clusterFeatures == null || clusterFeatures.length === 0) {
+      record('testClusterClick', false, '当前视野无聚合簇（zoom 过高或已展开）');
+      return;
+    }
+    const f = clusterFeatures[0];
+    const cid = f.properties.cluster_id;
+    const zoomBefore = map.getZoom();
+    const z = await map.getSource('tdt-cluster-source').getClusterExpansionZoom(cid);
+    map.easeTo({ center: f.geometry.coordinates, zoom: z });
+    await new Promise(r => setTimeout(r, 1200));
+    const zoomAfter = map.getZoom();
+    record('聚合点击展开', zoomAfter > zoomBefore, zoomBefore.toFixed(1) + ' → ' + zoomAfter.toFixed(1) + '（目标 ' + z + '）');
+  } catch (e) { record('testClusterClick', false, String(e)); }
+}
+
+async function testHeatmap() {
+  try {
+    map.jumpTo({ center: [121.4737, 31.2304], zoom: 13 });
+    addHeatmapPoc(generatePoints(500, true), { radius: 30, opacity: 0.6 });
+    await new Promise(r => setTimeout(r, 1200));
+    record('addHeatmap', map.getLayer('tdt-heatmap-layer') != null && map.getSource('tdt-heatmap-source') != null);
+    removeHeatmapPoc();
+    record('removeHeatmap', map.getLayer('tdt-heatmap-layer') == null && map.getSource('tdt-heatmap-source') == null);
+  } catch (e) { record('testHeatmap', false, String(e)); }
+}
+
+function clearVis() { removeMarkerClusterPoc(); removeHeatmapPoc(); log('可视化图层已清除', 'info'); }
+
+// ═══════════════════════════════════════════════════════════
+// 工具函数复刻（getDistance/getViewport/gcj02ToWgs84）
+// ═══════════════════════════════════════════════════════════
+const PI = 3.141592653589793, A = 6378245.0, EE = 0.006693421622965943;
+function isOutOfChina(lat, lng) { return lng < 72.004 || lng > 137.8347 || lat < 0.8293 || lat > 55.8271; }
+function transformLat(x, y) {
+  let ret = -100.0 + 2.0 * x + 3.0 * y + 0.2 * y * y + 0.1 * x * y + 0.2 * Math.sqrt(Math.abs(x));
+  ret += (20.0 * Math.sin(6.0 * x * PI) + 20.0 * Math.sin(2.0 * x * PI)) * 2.0 / 3.0;
+  ret += (20.0 * Math.sin(y * PI) + 40.0 * Math.sin(y / 3.0 * PI)) * 2.0 / 3.0;
+  ret += (160.0 * Math.sin(y / 12.0 * PI) + 320.0 * Math.sin(y * PI / 30.0)) * 2.0 / 3.0;
+  return ret;
+}
+function transformLng(x, y) {
+  let ret = 300.0 + x + 2.0 * y + 0.1 * x * x + 0.1 * x * y + 0.1 * Math.sqrt(Math.abs(x));
+  ret += (20.0 * Math.sin(6.0 * x * PI) + 20.0 * Math.sin(2.0 * x * PI)) * 2.0 / 3.0;
+  ret += (20.0 * Math.sin(x * PI) + 40.0 * Math.sin(x / 3.0 * PI)) * 2.0 / 3.0;
+  ret += (150.0 * Math.sin(x / 12.0 * PI) + 300.0 * Math.sin(x / 30.0 * PI)) * 2.0 / 3.0;
+  return ret;
+}
+function gcj02ToWgs84Poc(lat, lng) {
+  if (isOutOfChina(lat, lng)) return { lat: lat, lng: lng };
+  let dLat = transformLat(lng - 105.0, lat - 35.0);
+  let dLng = transformLng(lng - 105.0, lat - 35.0);
+  const radLat = lat / 180.0 * PI;
+  let magic = Math.sin(radLat);
+  magic = 1 - EE * magic * magic;
+  const sqrtMagic = Math.sqrt(magic);
+  dLat = (dLat * 180.0) / ((A * (1 - EE)) / (magic * sqrtMagic) * PI);
+  dLng = (dLng * 180.0) / (A / sqrtMagic * Math.cos(radLat) * PI);
+  return { lat: lat - dLat, lng: lng - dLng };
+}
+function getDistancePoc(start, end) {
+  const R = 6371000.0;
+  const dLat = (end.lat - start.lat) * PI / 180.0;
+  const dLng = (end.lng - start.lng) * PI / 180.0;
+  const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) + Math.cos(start.lat * PI / 180.0) * Math.cos(end.lat * PI / 180.0) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+function getViewportPoc(points) {
+  if (points.length === 0) return { center: { lat: 0, lng: 0 }, zoom: 0 };
+  if (points.length === 1) return { center: points[0], zoom: 15 };
+  let minLat = points[0].lat, maxLat = points[0].lat, minLng = points[0].lng, maxLng = points[0].lng;
+  for (let i = 1; i < points.length; i++) {
+    if (points[i].lat < minLat) minLat = points[i].lat;
+    if (points[i].lat > maxLat) maxLat = points[i].lat;
+    if (points[i].lng < minLng) minLng = points[i].lng;
+    if (points[i].lng > maxLng) maxLng = points[i].lng;
+  }
+  const centerLat = (minLat + maxLat) / 2.0, centerLng = (minLng + maxLng) / 2.0;
+  const maxSpan = Math.max(Math.abs(maxLat - minLat), Math.abs(maxLng - minLng));
+  let zoom = 15;
+  if (maxSpan > 0.0001) zoom = Math.floor(Math.log2(360.0 / maxSpan)) + 1;
+  if (zoom > 18) zoom = 18;
+  if (zoom < 3) zoom = 3;
+  return { center: { lat: centerLat, lng: centerLng }, zoom: zoom };
+}
+
+// ═══════════════════════════════════════════════════════════
+// 天地图 Web API 实测（重点：格式与 queryType 正确性）
+// ═══════════════════════════════════════════════════════════
+
+// 1) geocoder 格式对比：插件 Web 当前格式 vs Android/iOS 官方格式
+async function testGeocoderFormats() {
+  const { webApiKey } = getKeys();
+  if (!webApiKey) { record('testGeocoderFormats', false, '缺少 webApiKey'); return; }
+  log('── geocoder 逆地理编码格式对比 ──', 'info');
+
+  // 格式A：Web 插件当前实现（平铺参数）
+  const urlA = TDT_API_BASE + '/geocoder?lon=116.3975&lat=39.9088&ver=1&tk=' + webApiKey;
+  const rA = await fetchJson(urlA);
+  const msgA = rA.status === 'ok' && rA.json.msg != null ? (rA.json.msg || 'ok') : '请求失败';
+  log('格式A（Web 当前-平铺参数）: ' + rA.status + ' | ' + msgA, 'warn');
+  console.log('格式A 响应:', rA.json);
+
+  // 格式B：Android/iOS 实现（postStr JSON + type=geocode）
+  const postStrB = "{'lon':116.3975,'lat':39.9088,'ver':1}";
+  const urlB = TDT_API_BASE + '/geocoder?postStr=' + encodeURIComponent(postStrB) + '&type=geocode&tk=' + webApiKey;
+  const rB = await fetchJson(urlB);
+  const msgB = rB.status === 'ok' && rB.json.msg != null ? (rB.json.msg || 'ok') : '请求失败';
+  log('格式B（Android/iOS-postStr）: ' + rB.status + ' | ' + msgB, 'warn');
+  console.log('格式B 响应:', rB.json);
+
+  record('逆地理-格式A(平铺)', rA.status === 'ok' && rA.json.status === '0', 'msg=' + msgA);
+  record('逆地理-格式B(postStr)', rB.status === 'ok' && rB.json.status === '0', 'msg=' + msgB);
+  if (rB.status === 'ok' && rB.json.status === '0') {
+    const addr = rB.json.result ? rB.json.result.formatted_address : '(无)';
+    record('逆地理-格式B 结果内容', addr != null, 'formatted_address=' + addr);
+  }
+
+  log('── geocoder 地理编码格式对比 ──', 'info');
+  // 格式C：Web 插件当前实现（address 平铺）
+  const urlC = TDT_API_BASE + '/geocoder?address=' + encodeURIComponent('北京市东城区天安门') + '&ver=1&tk=' + webApiKey;
+  const rC = await fetchJson(urlC);
+  log('格式C（Web 当前-address 平铺）: ' + rC.status + ' | ' + summarize(rC.json), 'warn');
+  // 格式D：Android/iOS 实现（ds={"keyWord":...}）
+  const dsD = '{"keyWord":"北京市东城区天安门"}';
+  const urlD = TDT_API_BASE + '/geocoder?ds=' + encodeURIComponent(dsD) + '&tk=' + webApiKey;
+  const rD = await fetchJson(urlD);
+  log('格式D（Android/iOS-ds）: ' + rD.status + ' | ' + summarize(rD.json), 'warn');
+  record('地理编码-格式C(address)', rC.status === 'ok' && rC.json.status === '0', summarize(rC.json));
+  record('地理编码-格式D(ds)', rD.status === 'ok' && rD.json.status === '0', summarize(rD.json));
+}
+
+// 2) v2/search 各 queryType 实测
+async function testSearchQueryTypes() {
+  const { webApiKey } = getKeys();
+  if (!webApiKey) { record('testSearchQueryTypes', false, '缺少 webApiKey'); return; }
+  log('── v2/search queryType 实测 ──', 'info');
+
+  // queryType=12 行政区划（当前插件实现）
+  const p12 = '{"keyWord":"酒店","queryType":"12","specify":"156000000","start":"0","count":"3"}';
+  const r12 = await fetchJson(TDT_API_BASE + '/v2/search?postStr=' + encodeURIComponent(p12) + '&type=query&tk=' + webApiKey);
+  const ok12 = r12.status === 'ok' && (r12.json.status === '0' || (r12.json.status && r12.json.status.infocode === 1000));
+  log('queryType=12 行政区划: ' + (ok12 ? '✅' : '❌') + ' ' + summarize(r12.json), ok12 ? 'pass' : 'fail');
+  record('v2 行政区划搜索(12)', ok12, summarize(r12.json));
+
+  // queryType=3 周边搜索（pointLonlat + queryRadius）
+  const p3 = '{"keyWord":"餐厅","queryType":"3","pointLonlat":"116.3975,39.9088","queryRadius":"1000","start":"0","count":"3"}';
+  const r3 = await fetchJson(TDT_API_BASE + '/v2/search?postStr=' + encodeURIComponent(p3) + '&type=query&tk=' + webApiKey);
+  const ok3 = r3.status === 'ok' && (r3.json.status === '0' || (r3.json.status && r3.json.status.infocode === 1000));
+  log('queryType=3 周边搜索: ' + (ok3 ? '✅' : '❌') + ' ' + summarize(r3.json), ok3 ? 'pass' : 'fail');
+  record('v2 周边搜索(3)', ok3, summarize(r3.json));
+
+  // queryType=1 普通搜索
+  const p1 = '{"keyWord":"北京大学","queryType":"1","start":"0","count":"3"}';
+  const r1 = await fetchJson(TDT_API_BASE + '/v2/search?postStr=' + encodeURIComponent(p1) + '&type=query&tk=' + webApiKey);
+  const ok1 = r1.status === 'ok' && (r1.json.status === '0' || (r1.json.status && r1.json.status.infocode === 1000));
+  log('queryType=1 普通搜索: ' + (ok1 ? '✅' : '❌') + ' ' + summarize(r1.json), ok1 ? 'pass' : 'fail');
+  record('v2 普通搜索(1)', ok1, summarize(r1.json));
+
+  // queryType=2 视野内搜索（mapBound + level）
+  const p2 = '{"keyWord":"银行","queryType":"2","mapBound":"116.37552,39.8935,116.42102,39.91804","level":"15","start":"0","count":"3"}';
+  const r2 = await fetchJson(TDT_API_BASE + '/v2/search?postStr=' + encodeURIComponent(p2) + '&type=query&tk=' + webApiKey);
+  const ok2 = r2.status === 'ok' && (r2.json.status === '0' || (r2.json.status && r2.json.status.infocode === 1000));
+  log('queryType=2 视野内搜索: ' + (ok2 ? '✅' : '❌') + ' ' + summarize(r2.json), ok2 ? 'pass' : 'fail');
+  record('v2 视野内搜索(2)', ok2, summarize(r2.json));
+}
+
+// 3) v1.7.1 修复后搜索实现复刻（buildSearchParams 按 mode 路由 queryType）
+async function testSearchImpl() {
+  const { webApiKey } = getKeys();
+  if (!webApiKey) { record('testSearchImpl', false, '缺少 webApiKey'); return; }
+  // search：queryType=12 行政区划（specify 默认 156000000）
+  const p = new Map([['postStr', '{"keyWord":"酒店","queryType":"12","specify":"156000000","start":"0","count":"5"}'], ['type', 'query']]);
+  const url = buildTdtApiUrl('/v2/search', p, webApiKey);
+  const r = await fetchJson(url);
+  const ok = r.status === 'ok' && (r.json.status === '0' || (r.json.status && r.json.status.infocode === 1000));
+  const cnt = r.status === 'ok' ? (r.json.count != null ? r.json.count : '?') : '?';
+  record('插件 search 复刻(12)', ok, 'count=' + cnt);
+  // searchNearby：queryType=3 周边（pointLonlat+queryRadius 进 URL）
+  const p2 = new Map([['postStr', '{"keyWord":"餐厅","queryType":"3","pointLonlat":"116.3975,39.9088","queryRadius":"1000","start":"0","count":"5"}'], ['type', 'query']]);
+  const url2 = buildTdtApiUrl('/v2/search', p2, webApiKey);
+  const r2 = await fetchJson(url2);
+  const ok2 = r2.status === 'ok' && (r2.json.status === '0' || (r2.json.status && r2.json.status.infocode === 1000));
+  record('插件 searchNearby 复刻(3)', ok2, 'pointLonlat/queryRadius 已进 URL');
+  // searchInBounds：queryType=2 视野内（mapBound+level 进 URL）
+  const p3 = new Map([['postStr', '{"keyWord":"银行","queryType":"2","mapBound":"116.37552,39.8935,116.42102,39.91804","level":"15","start":"0","count":"5"}'], ['type', 'query']]);
+  const url3 = buildTdtApiUrl('/v2/search', p3, webApiKey);
+  const r3 = await fetchJson(url3);
+  const ok3 = r3.status === 'ok' && (r3.json.status === '0' || (r3.json.status && r3.json.status.infocode === 1000));
+  record('插件 searchInBounds 复刻(2)', ok3, 'mapBound/level 已进 URL');
 }
 </script>
 </body>
