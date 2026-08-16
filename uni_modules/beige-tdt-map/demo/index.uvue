@@ -143,6 +143,14 @@
         </view>
         <text v-if="infoText.length > 0" class="result-text">{{ infoText }}</text>
 
+        <text class="section-title">📊 数据可视化（v1.7.0 新增）</text>
+        <view class="btn-row">
+          <button class="btn" @tap="demoCluster">300点聚合</button>
+          <button class="btn" @tap="clearCluster">清除聚合</button>
+          <button class="btn" @tap="demoHeatmap">热力图</button>
+          <button class="btn" @tap="clearHeatmap">清除热力</button>
+        </view>
+
         <text class="section-title">🗺️ 地图事件日志</text>
         <text v-if="clickLog.length > 0" class="result-text">{{ clickLog }}</text>
       </scroll-view>
@@ -152,7 +160,7 @@
 
 <script setup lang="uts">
 import { ref } from 'vue'
-import type { MapClickDetail, MapErrorDetail, MapBoundsDetail, GeocodeCallback, SearchOptions } from '@/uni_modules/beige-tdt-map'
+import type { MapClickDetail, MapErrorDetail, MapBoundsDetail, GeocodeCallback, SearchOptions, ClusterOptions, HeatmapItem } from '@/uni_modules/beige-tdt-map'
 
 const mapRef = ref(null as any | null)
 const coordResult = ref('')
@@ -540,6 +548,44 @@ function takeSnapshot(): void {
 function showCenter(): void {
   const c = mapRef.value?.getCurrentCenter()
   if (c != null) infoText.value = '中心: ' + c.lat.toFixed(4) + ', ' + c.lng.toFixed(4)
+}
+
+// ── 数据可视化 v1.7.0 ──
+
+function demoCluster(): void {
+  const pts: Array<MapClickDetail> = []
+  for (let i = 0; i < 300; i++) {
+    pts.push({
+      lat: 31.2304 + (Math.random() - 0.5) * 0.5,
+      lng: 121.4737 + (Math.random() - 0.5) * 0.5
+    })
+  }
+  const opts: ClusterOptions = { clusterRadius: 50, clusterMaxZoom: 14 }
+  mapRef.value?.addMarkerCluster(pts, opts)
+  infoText.value = '已添加 300 个聚合点（点击聚合簇自动放大）'
+}
+
+function clearCluster(): void {
+  mapRef.value?.removeMarkerCluster()
+  infoText.value = '聚合层已清除'
+}
+
+function demoHeatmap(): void {
+  const pts: Array<HeatmapItem> = []
+  for (let i = 0; i < 500; i++) {
+    pts.push({
+      lat: 31.2304 + (Math.random() - 0.5) * 0.4,
+      lng: 121.4737 + (Math.random() - 0.5) * 0.4,
+      weight: Math.floor(Math.random() * 10) + 1
+    })
+  }
+  mapRef.value?.addHeatmap(pts, { radius: 30, opacity: 0.6 })
+  infoText.value = '已添加 500 点热力图'
+}
+
+function clearHeatmap(): void {
+  mapRef.value?.removeHeatmap()
+  infoText.value = '热力层已清除'
 }
 
 function showZoom(): void {
