@@ -1252,3 +1252,54 @@ export function addMarkerCluster(points: Array<MapClickDetail>, options?: Cluste
 export function removeMarkerCluster(): void {
     removeClusterInternal()
 }
+
+// ═══════════════════════════════════════════════════════════
+// v1.7.0: 热力图（context7: MapLibre 官方 heatmap 图层示例）
+// heatmap-weight 取数据 weight 属性，radius/opacity 可配
+// ═══════════════════════════════════════════════════════════
+export function addHeatmap(points: Array<HeatmapItem>, options?: HeatmapOptions): void {
+    if (mapInstance == null) return
+    removeHeatmap()
+    if (points.length == 0) return
+    try {
+        const features: Array<any> = []
+        for (let i = 0; i < points.length; i++) {
+            features.push({
+                type: 'Feature',
+                geometry: { type: 'Point', coordinates: [points[i].lng, points[i].lat] },
+                properties: { weight: points[i].weight ?? 1 }
+            })
+        }
+        mapInstance.addSource('tdt-heatmap-source', {
+            type: 'geojson',
+            data: { type: 'FeatureCollection', features: features }
+        })
+        mapInstance.addLayer({
+            id: 'tdt-heatmap-layer',
+            type: 'heatmap',
+            source: 'tdt-heatmap-source',
+            paint: {
+                'heatmap-weight': ['get', 'weight'],
+                'heatmap-radius': options?.radius ?? 30,
+                'heatmap-opacity': options?.opacity ?? 0.6,
+                'heatmap-color': [
+                    'interpolate', ['linear'], ['heatmap-density'],
+                    0, 'rgba(0, 0, 255, 0)',
+                    0.2, 'rgb(0, 0, 255)',
+                    0.4, 'rgb(0, 255, 0)',
+                    0.6, 'rgb(255, 255, 0)',
+                    0.8, 'rgb(255, 165, 0)',
+                    1, 'rgb(255, 0, 0)'
+                ]
+            }
+        })
+    } catch (e: any) {
+        console.error('TDTMap Web: addHeatmap 失败', e)
+    }
+}
+
+export function removeHeatmap(): void {
+    if (mapInstance == null) return
+    try { mapInstance.removeLayer('tdt-heatmap-layer') } catch (e) { /* ignore */ }
+    try { mapInstance.removeSource('tdt-heatmap-source') } catch (e) { /* ignore */ }
+}
