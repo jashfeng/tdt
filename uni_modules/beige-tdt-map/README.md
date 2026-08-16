@@ -412,7 +412,8 @@ type SearchOptions = {
 - 版权条：四端统一 uvue 层（天地图服务条款要求在显著位置标注"天地图"与审图号），默认"© 天地图"，可通过 `copyrightText` 填入审图号
 - 新增 4 个 props：`showZoomControl` / `showScaleControl` / `showCopyrightControl` / `copyrightText`
 - 动态切换限制：`showZoomControl`/`showScaleControl` 在鸿蒙/Web 原生端为初始化一次性配置（同 `textureMode` 限制）；Android/iOS 的 uvue 控件与 `copyrightText`/`showCopyrightControl` 天然响应式
-- 隐藏 MapLibre 原生 logo 与 attribution（Android/iOS/Web），鸿蒙华为 logo 移位右上角——避免与 uvue 版权条重叠及错误版权信息
+- 隐藏 MapLibre 原生 logo 与 attribution（Android/iOS/Web），鸿蒙华为 logo 移位右下角（BOTTOM_END）——避免与 uvue 版权条重叠及错误版权信息
+- 修复鸿蒙 logo 位置 TOP_END→BOTTOM_END：右上角与华为默认指南针（旋转/倾斜时出现）重叠；BOTTOM_END 为华为官方示例位置，与缩放控件共存
 - 修复 Android 缩放按钮无响应：`zoomIn`/`zoomOut` 沿用 v1.5.5 实测结论改用 `moveCamera` 瞬时缩放（`animateCamera` 动画在 UTS 集成下不推进）
 
 ### v1.5.5 ⚡（2026-08）

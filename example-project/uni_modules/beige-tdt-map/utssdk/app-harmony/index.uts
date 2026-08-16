@@ -239,13 +239,16 @@ export function initMap(
         }
         mapController = controller
 
-        // v1.6.0: 华为 logo 不可移除/遮挡（官方政策），移位右上角避让左下角 uvue 版权条；
+        // v1.6.0: 华为 logo 不可移除/遮挡（官方政策），移位右下角避让左下角 uvue 版权条；
+        // 选择 BOTTOM_END 而非 TOP_END：华为指南针控件默认位于右上角（地图旋转/倾斜时
+        // 出现），logo 放右上会与之重叠；BOTTOM_END 为华为官方文档示例位置，与缩放
+        // 控件共存由官方控件系统自动避让。
         // 审图号为华为地图内容与天地图无关，显式关闭（setApproveNumberEnabled 自 6.1.0(23) 支持），
         // 版权由 uvue 版权条统一承担
         // 来源：developer.huawei.com/consumer/cn/doc/harmonyos-guides/map-controls-and-interaction
         // 低版本 MapKit 方法不存在会抛异常，此处 try/catch 降级——控件配置失败不应阻断瓦片创建
         try {
-            controller.setLogoAlignment(mapCommon.LogoAlignment.TOP_END)
+            controller.setLogoAlignment(mapCommon.LogoAlignment.BOTTOM_END)
             controller.setApproveNumberEnabled(false)
         } catch (e: any) {
             console.warn("TDTMap: 控件配置失败（低版本 MapKit 不支持）", e.message ?? String(e))

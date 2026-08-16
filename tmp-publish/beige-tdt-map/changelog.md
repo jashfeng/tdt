@@ -7,7 +7,8 @@
 - ✨ 新增：版权条控件——四端统一 uvue 层（天地图服务条款合规要求），默认"© 天地图"，可通过 copyrightText 填入审图号
 - ✨ 新增 props：showZoomControl / showScaleControl / showCopyrightControl / copyrightText
 - 📌 注意：showZoomControl/showScaleControl 在鸿蒙/Web 原生端为初始化一次性配置（同 textureMode 限制）；Android/iOS 的 uvue 控件与版权条 props 天然响应式
-- 🐛 修复：Android/iOS/Web 隐藏 MapLibre 原生 logo 与 attribution（避免与版权条重叠及错误版权信息）；鸿蒙华为 logo 移位右上角避让
+- 🐛 修复：Android/iOS/Web 隐藏 MapLibre 原生 logo 与 attribution（避免与版权条重叠及错误版权信息）；鸿蒙华为 logo 移位右下角避让
+- 🐛 修复：鸿蒙 logo 位置 TOP_END→BOTTOM_END——右上角与华为默认指南针（旋转/倾斜时出现）重叠；BOTTOM_END 为华为官方示例位置，与缩放控件共存
 - 🐛 修复：Android 缩放按钮无响应——`zoomIn`/`zoomOut` 沿用 v1.5.5 实测结论改用 `moveCamera` 瞬时缩放（`animateCamera` 动画在 UTS 集成下不推进）
 
 ## 1.5.8（2026-08）

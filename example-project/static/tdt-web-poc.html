@@ -72,8 +72,25 @@ function initMap() {
     center: [116.4075, 39.9042],
     zoom: 12,
     maxZoom: 18,
-    minZoom: 1
+    minZoom: 1,
+    attributionControl: false  // v1.6.0: 与插件 web/index.uts 一致，关闭原生 attribution
   });
+
+  // ═══ v1.6.0 控件（复刻 web/index.uts L300-322 逻辑，供浏览器验证）═══
+  // 隐藏 MapLibre 原生 logo（GL JS 无 logoEnabled 选项，CSS 注入隐藏，幂等）
+  if (document.getElementById('tdt-hide-logo-style') == null) {
+    const hideLogoStyle = document.createElement('style');
+    hideLogoStyle.id = 'tdt-hide-logo-style';
+    hideLogoStyle.textContent = '.maplibregl-ctrl-logo { display: none !important; }';
+    document.head.appendChild(hideLogoStyle);
+  }
+  // 缩放按钮与比例尺（bottom-right 自动堆叠）
+  const navControl = new maplibregl.NavigationControl({ showCompass: false });
+  map.addControl(navControl, 'bottom-right');
+  map.tdtNavControl = navControl;
+  const scaleControl = new maplibregl.ScaleControl({ maxWidth: 100 });
+  map.addControl(scaleControl, 'bottom-right');
+  map.tdtScaleControl = scaleControl;
 
   map.on('load', () => {
     // 底图
