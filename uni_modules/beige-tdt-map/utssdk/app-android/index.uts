@@ -2,6 +2,12 @@ import { Context } from "android.content"
 import { MapLibre } from "org.maplibre.android"
 import { MapView, MapLibreMap, Style, MapLibreMapOptions } from "org.maplibre.android.maps"
 import { Property, PropertyFactory } from "org.maplibre.android.style.layers"
+// v1.7.0: 标记聚合 + 热力图（context7: maplibre-native issue #3519 验证包名与用法，
+// MapLibre Android 保留 com.mapbox.geojson 包名）
+import { Expression } from "org.maplibre.android.style.expressions"
+import { GeoJsonSource, GeoJsonOptions } from "org.maplibre.android.style.sources"
+import { CircleLayer, SymbolLayer, HeatmapLayer } from "org.maplibre.android.style.layers"
+import { FeatureCollection, Feature, Point } from "com.mapbox.geojson"
 import { CameraPosition, CameraUpdateFactory } from "org.maplibre.android.camera"
 import { LatLng } from "org.maplibre.android.geometry"
 import { LatLngBounds } from "org.maplibre.android.geometry"
@@ -19,7 +25,8 @@ import { GradientDrawable } from "android.graphics.drawable"
 import {
     TDMapOptions, MapClickDetail, MapBoundsDetail, MapErrorDetail, MapSizeDetail, MapViewportDetail,
     MapClickCallback, MapReadyCallback, MapErrorCallback, MarkerClickCallback, GeocodeCallback, SearchOptions,
-    MapLongClickCallback, CameraChangeCallback
+    MapLongClickCallback, CameraChangeCallback,
+    ClusterOptions, HeatmapItem, HeatmapOptions
 } from '../interface.uts'
 
 // ⚠️ 天地图 Key 类型说明（自新系统升级后严格区分，混用会导致瓦片不显示）:
@@ -235,6 +242,24 @@ export function initMap(
         const clickCb = onClickCallback
         map.addOnMapClickListener((point: LatLng) => {
             console.log("TDTMap: [DIAG] 地图点击触发 lat=" + point.latitude + " lng=" + point.longitude)
+            // v1.7.0: Priority 0: 聚合簇点击检测（context7: queryRenderedFeatures 按 layer 查询，
+            // Feature.getBooleanProperty("cluster") 判断是否聚合簇，getClusterExpansionZoom 返回展开缩放级别）
+            // 注意：不在聚合回调中调用 setGeoJson 更新数据（issue #3519 竞态崩溃），仅放大视图
+            // queryRenderedFeatures(PointF, String...) 为 Java vararg，UTS→Kotlin 后直接传参合法；
+            // 若编译报错改用 arrayOf("tdt-cluster-layer")（列入 Task 12 验证项）
+            const clusterSrc = clusterSourceRef
+            if (clusterSrc != null) {
+                const screenPt = map.getProjection().toScreenLocation(point)
+                const hitFeatures = map.queryRenderedFeatures(screenPt, "tdt-cluster-layer")
+                if (hitFeatures != null && hitFeatures.length > 0) {
+                    const hit = hitFeatures[0]
+                    if (hit.getBooleanProperty("cluster")) {
+                        const zoom = clusterSrc.getClusterExpansionZoom(hit)
+                        map.animateCamera(CameraUpdateFactory.newLatLngZoom(point, zoom), 300)
+                        return true  // 聚合点击消费事件：放大展开，不触发 mapClick
+                    }
+                }
+            }
             // Priority 1: 检查标记点击（markerClickCallback）
             const markerCb = markerClickCallback
             if (markerCb != null) {
@@ -1770,4 +1795,102 @@ export function enableTilt(enabled: boolean): void {
 @UTSJS.keepAlive
 export function setCameraChangeCallback(callback: CameraChangeCallback): void {
     cameraChangeCallback = callback
+}
+
+// ══════════════════════════════════════════════
+// v1.7.0 新增：标记聚合 + 热力图（数据可视化）
+// context7: maplibre-native issue #3519 真实代码（Android 11.9.0）验证 GeoJsonSource cluster
+// API 家族；已知竞态 bug（setGeoJson 更新后立即 getClusterExpansionZoom 崩溃）→
+// 本实现重复调用 addMarkerCluster 时先 remove 再重建，规避该 bug
+// ══════════════════════════════════════════════
+let clusterSourceRef: GeoJsonSource | null = null
+let clusterLayerRefs: Array<CircleLayer | SymbolLayer> = []
+let heatmapSourceRef: GeoJsonSource | null = null
+let heatmapLayerRef: HeatmapLayer | null = null
+
+function buildPointFeatures(points: Array<MapClickDetail>): FeatureCollection {
+    const features: Array<Feature> = []
+    for (let i = 0; i < points.length; i++) {
+        features.push(Feature.fromGeometry(Point.fromLngLat(points[i].lng.toDouble(), points[i].lat.toDouble())))
+    }
+    return FeatureCollection.fromFeatures(features)
+}
+
+// removeSource 统一传字符串 ID（Style.removeSource(String) 与 removeSource(Source) 重载均存在，
+// 传 ID 最简且规避 UTS 重载解析歧义）
+function removeClusterInternal(): void {
+    const style = mapLibreMap?.getStyle()
+    if (style != null) {
+        for (let i = 0; i < clusterLayerRefs.length; i++) {
+            try { style.removeLayer(clusterLayerRefs[i]) } catch (e: any) { /* ignore */ }
+        }
+        try { style.removeSource("tdt-cluster-source") } catch (e: any) { /* ignore */ }
+    }
+    clusterLayerRefs = []
+    clusterSourceRef = null
+}
+
+export function addMarkerCluster(points: Array<MapClickDetail>, options?: ClusterOptions): void {
+    const style = mapLibreMap?.getStyle()
+    const errorCb = onErrorCallback
+    if (style == null) {
+        if (errorCb != null) errorCb({ code: 4, message: "样式未加载，无法添加聚合图层" })
+        return
+    }
+    removeClusterInternal()
+    if (points.length == 0) return
+    try {
+        const radius = options?.clusterRadius ?? 50
+        const maxZoom = options?.clusterMaxZoom ?? 14
+        const geoOpts = new GeoJsonOptions()
+            .withCluster(true)
+            .withClusterRadius(radius.toInt())
+            .withClusterMaxZoom(maxZoom.toInt())
+        const source = new GeoJsonSource("tdt-cluster-source", buildPointFeatures(points), geoOpts)
+        style.addSource(source)
+        clusterSourceRef = source
+
+        // 聚合簇圆点（filter has("point_count") 区分聚合簇与原始点）
+        const clusterLayer = new CircleLayer("tdt-cluster-layer", "tdt-cluster-source")
+        clusterLayer.setProperties(
+            PropertyFactory.circleColor(Color.parseColor("#51BBD6")),
+            PropertyFactory.circleRadius(20.0),
+            PropertyFactory.circleStrokeColor(Color.parseColor("#FFFFFF")),
+            PropertyFactory.circleStrokeWidth(1.0)
+        )
+        clusterLayer.setFilter(Expression.has("point_count"))
+        style.addLayer(clusterLayer)
+        clusterLayerRefs.push(clusterLayer)
+
+        // 聚合簇数量文字（point_count_abbreviated 为引擎自动生成的缩写计数）
+        const countLayer = new SymbolLayer("tdt-cluster-count", "tdt-cluster-source")
+        countLayer.setProperties(
+            PropertyFactory.textField(Expression.get("point_count_abbreviated")),
+            PropertyFactory.textSize(12.0),
+            PropertyFactory.textColor(Color.parseColor("#FFFFFF"))
+        )
+        countLayer.setFilter(Expression.has("point_count"))
+        style.addLayer(countLayer)
+        clusterLayerRefs.push(countLayer)
+
+        // 未聚合原始点（filter 非 has("point_count")）
+        const unclusterLayer = new CircleLayer("tdt-cluster-unclustered", "tdt-cluster-source")
+        unclusterLayer.setProperties(
+            PropertyFactory.circleColor(Color.parseColor("#11B4DA")),
+            PropertyFactory.circleRadius(5.0),
+            PropertyFactory.circleStrokeColor(Color.parseColor("#FFFFFF")),
+            PropertyFactory.circleStrokeWidth(1.0)
+        )
+        unclusterLayer.setFilter(Expression.not(Expression.has("point_count")))
+        style.addLayer(unclusterLayer)
+        clusterLayerRefs.push(unclusterLayer)
+    } catch (e: any) {
+        console.error("TDTMap: 添加聚合图层失败: " + e.message)
+        if (errorCb != null) errorCb({ code: 4, message: "添加聚合图层失败: " + e.message })
+        removeClusterInternal()
+    }
+}
+
+export function removeMarkerCluster(): void {
+    removeClusterInternal()
 }
