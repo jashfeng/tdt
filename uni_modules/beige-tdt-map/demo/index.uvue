@@ -553,6 +553,9 @@ function showCenter(): void {
 // ── 数据可视化 v1.7.0 ──
 
 function demoCluster(): void {
+  // 演示点在上海外滩附近，先把视野移过去再添加，否则点落在初始北京视野之外
+  mapRef.value?.moveToCenter(31.2304, 121.4737)
+  mapRef.value?.zoomTo(13)
   const pts: Array<MapClickDetail> = []
   for (let i = 0; i < 300; i++) {
     pts.push({
@@ -571,6 +574,9 @@ function clearCluster(): void {
 }
 
 function demoHeatmap(): void {
+  // 同上：先把视野移到热力点分布区
+  mapRef.value?.moveToCenter(31.2304, 121.4737)
+  mapRef.value?.zoomTo(13)
   const pts: Array<HeatmapItem> = []
   for (let i = 0; i < 500; i++) {
     pts.push({
