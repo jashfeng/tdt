@@ -7,12 +7,18 @@ import { MLNPolyline } from "MapLibre"
 import { MLNFillStyleLayer } from "MapLibre"
 import { MLNLineStyleLayer } from "MapLibre"
 import { MLNShapeSource } from "MapLibre"
+// v1.7.0: 标记聚合 + 热力图（context7: MapLibre iOS 为 Mapbox iOS SDK 6 fork，聚类 API 同源）
+import { MLNCircleStyleLayer } from "MapLibre"
+import { MLNHeatmapStyleLayer } from "MapLibre"
+import { MLNPointFeature, MLNPointFeatureCluster, MLNShapeSourceOption } from "MapLibre"
+import { MLNShape } from "MapLibre"
+import { NSPredicate, NSDictionary } from "Foundation"
 import { MLNCoordinateBoundsMake } from "MapLibre"
 import { CLLocationCoordinate2DMake, CLLocationManager, CLLocation } from "CoreLocation"
 import { UITapGestureRecognizer, UILongPressGestureRecognizer, UIColor, UIGraphicsImageRenderer, UIImagePNGRepresentation } from "UIKit"
 import { UIEdgeInsets } from "UIKit"
 import { NSURL, NSExpression, NSBundle, NSString } from "Foundation"
-import { TDMapOptions, MapClickDetail, MapBoundsDetail, MapErrorDetail, MapSizeDetail, MapViewportDetail, MapClickCallback, MapReadyCallback, MapErrorCallback, MarkerClickCallback, GeocodeCallback, SearchOptions, MapLongClickCallback, CameraChangeCallback } from '../interface.uts'
+import { TDMapOptions, MapClickDetail, MapBoundsDetail, MapErrorDetail, MapSizeDetail, MapViewportDetail, MapClickCallback, MapReadyCallback, MapErrorCallback, MarkerClickCallback, GeocodeCallback, SearchOptions, MapLongClickCallback, CameraChangeCallback, ClusterOptions, HeatmapItem, HeatmapOptions } from '../interface.uts'
 
 // ⚠️ 天地图 Key 类型说明（自新系统升级后严格区分，混用会导致瓦片不显示）:
 //   - "浏览器端" key：校验 Referer 头 + 域名白名单 → 原生 App 不发送浏览器 Referer → 403 被拒 → 灰白背景
@@ -210,6 +216,22 @@ export function initMap(
         if (didSelectMarkerFlag) {
             didSelectMarkerFlag = false
             return
+        }
+        // v1.7.0: 聚合簇点击检测（visibleFeatures 查询指定 layer 的要素；
+        // attributes["cluster"]==true 时为 MLNPointFeatureCluster，调用 zoomLevelForExpandingCluster 放大展开）
+        // ⚠️ 编译验证项：UTS 中 Set 用 new 构造（TS 语义），Swift 签名为 Set<String>?；
+        // 若 new Set 语法报错，改用 NSSet(array: ["tdt-cluster-layer"]) 并在 Task 12 记录
+        if (mapView != null && clusterSourceRef != null) {
+            const clusterPoint = gesture.locationInView(mapView)
+            const hitFeatures = mapView.visibleFeatures(at: clusterPoint, inFeatureLayersWithIdentifiers: new Set<string>(["tdt-cluster-layer"]))
+            if (hitFeatures != null && hitFeatures.count > 0) {
+                const cluster = hitFeatures[0] as MLNPointFeatureCluster
+                const zoom = clusterSourceRef?.zoomLevelForExpandingCluster(cluster)
+                if (zoom != null && zoom > 0) {
+                    mapView.setCenterCoordinate(CLLocationCoordinate2DMake(cluster.coordinate.latitude, cluster.coordinate.longitude), zoom, true)
+                    return  // 聚合点击消费事件，不触发 onClick
+                }
+            }
         }
         if (mapView != null && onClickCallback != null) {
             const point = gesture.locationInView(mapView)
@@ -1326,4 +1348,71 @@ export function enableTilt(enabled: boolean): void {
 @UTSJS.keepAlive
 export function setCameraChangeCallback(callback: CameraChangeCallback): void {
     cameraChangeCallback = callback
+}
+
+// ══════════════════════════════════════════════
+// v1.7.0 新增：标记聚合 + 热力图（数据可视化）
+// context7: MapLibre iOS 为 Mapbox iOS SDK 6 fork，聚类 API 同源：
+// MLNShapeSource options 键 MLNShapeSourceOption.clustered / .clusterRadius /
+// .maximumZoomLevelForClustering；聚合簇是 MLNPointFeatureCluster（MLNFeature 子类，
+// attributes 含 "cluster"=true、"point_count"）；source.zoomLevelForExpandingCluster(cluster)
+// 返回展开缩放级别
+// ⚠️ 编译期验证项：MLNShapeSourceOption 枚举键名与 zoomLevelForExpandingCluster 方法签名
+// 若编译报错，按 Mapbox iOS SDK 官方 API 参考调整（本实现已按同源 API 编写）
+// ══════════════════════════════════════════════
+let clusterSourceRef: MLNShapeSource | null = null
+let clusterCircleLayerRef: MLNCircleStyleLayer | null = null
+
+export function addMarkerCluster(points: Array<MapClickDetail>, options?: ClusterOptions): void {
+    if (mapView == null || mapView.style == null) {
+        if (onErrorCallback != null) onErrorCallback({ code: 4, message: "样式未加载，无法添加聚合图层" })
+        return
+    }
+    removeMarkerCluster()
+    if (points.length == 0) return
+    try {
+        const features: Array<MLNPointFeature> = []
+        for (let i = 0; i < points.length; i++) {
+            const f = new MLNPointFeature()
+            f.coordinate = CLLocationCoordinate2DMake(points[i].lat, points[i].lng)
+            features.push(f)
+        }
+        const opts = NSDictionary.dictionaryWithObjectsForKeys(
+            [true, (options?.clusterRadius ?? 50).toInt32(), (options?.clusterMaxZoom ?? 14).toInt32()],
+            [MLNShapeSourceOption.clustered, MLNShapeSourceOption.clusterRadius, MLNShapeSourceOption.maximumZoomLevelForClustering]
+        ) as NSDictionary
+        const source = new MLNShapeSource("tdt-cluster-source", features as MLNShape[], opts)
+        mapView.style?.addSource(source)
+        clusterSourceRef = source
+
+        // 聚合簇圆点图层：predicate 匹配 cluster==true 的要素（MLNPointFeatureCluster）
+        const layer = new MLNCircleStyleLayer("tdt-cluster-layer", source)
+        layer.predicate = NSPredicate(format: "cluster == YES")
+        layer.circleColor = NSExpression(forConstantValue: UIColor.blueColor())
+        layer.circleRadius = NSExpression(forConstantValue: 20.0)
+        layer.circleStrokeColor = NSExpression(forConstantValue: UIColor.whiteColor())
+        layer.circleStrokeWidth = NSExpression(forConstantValue: 1.0)
+        mapView.style?.addLayer(layer)
+        clusterCircleLayerRef = layer
+    } catch (e) {
+        console.error("TDTMap: 添加聚合图层失败: " + e.toString())
+        if (onErrorCallback != null) onErrorCallback({ code: 4, message: "添加聚合图层失败: " + e.toString() })
+        removeMarkerCluster()
+    }
+}
+
+export function removeMarkerCluster(): void {
+    if (mapView == null || mapView.style == null) {
+        clusterSourceRef = null
+        clusterCircleLayerRef = null
+        return
+    }
+    if (clusterCircleLayerRef != null) {
+        mapView.style?.removeLayer(clusterCircleLayerRef)
+    }
+    if (clusterSourceRef != null) {
+        mapView.style?.removeSource(clusterSourceRef)
+    }
+    clusterCircleLayerRef = null
+    clusterSourceRef = null
 }
