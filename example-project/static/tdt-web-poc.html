@@ -68,7 +68,9 @@ function initMap() {
 
   map = new maplibregl.Map({
     container: 'map',
-    style: { version: 8, sources: {}, layers: [] },
+    // v1.7.0: glyphs 字体端点（style spec 强制校验：text-field 图层需 style 含 glyphs，
+    // 否则图层被静默拒绝，聚合数字标签不渲染——与插件 web/index.uts 同步修复）
+    style: { version: 8, glyphs: 'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf', sources: {}, layers: [] },
     center: [116.4075, 39.9042],
     zoom: 12,
     maxZoom: 18,
@@ -171,6 +173,122 @@ function clearMarkers() {
   markers.forEach(m => m.remove());
   markers = [];
   document.getElementById('info').textContent = '标记已清除';
+}
+
+// ════════════════════════════════════════════════════════
+// v1.7.0 聚合/热力复刻（对齐 web/index.uts 实现，供浏览器实测验证）
+// ════════════════════════════════════════════════════════
+
+// 随机点生成器（上海外滩附近，与 demo/index.uvue 一致）
+function generatePoints(count, withWeight) {
+  const pts = [];
+  for (let i = 0; i < count; i++) {
+    const p = {
+      lat: 31.2304 + (Math.random() - 0.5) * 0.5,
+      lng: 121.4737 + (Math.random() - 0.5) * 0.5
+    };
+    if (withWeight) p.weight = Math.floor(Math.random() * 10) + 1;
+    pts.push(p);
+  }
+  return pts;
+}
+
+// v1.7.0 聚合（复刻 web/index.uts L1189-1253）
+function addMarkerClusterPoc(points, options) {
+  if (!map) return;
+  removeMarkerClusterPoc();
+  if (!points || points.length === 0) return;
+  const radius = (options && options.clusterRadius) || 50;
+  const maxZoom = (options && options.clusterMaxZoom) || 14;
+  const features = points.map(p => ({
+    type: 'Feature',
+    geometry: { type: 'Point', coordinates: [p.lng, p.lat] },
+    properties: {}
+  }));
+  map.addSource('tdt-cluster-source', {
+    type: 'geojson',
+    data: { type: 'FeatureCollection', features: features },
+    cluster: true,
+    clusterRadius: radius,
+    clusterMaxZoom: maxZoom
+  });
+  map.addLayer({
+    id: 'tdt-cluster-layer', type: 'circle', source: 'tdt-cluster-source',
+    filter: ['has', 'point_count'],
+    paint: {
+      'circle-color': ['step', ['get', 'point_count'], '#51BBD6', 100, '#F1F075', 750, '#F28CB1'],
+      'circle-radius': ['step', ['get', 'point_count'], 20, 100, 30, 750, 40],
+      'circle-stroke-width': 1, 'circle-stroke-color': '#FFFFFF'
+    }
+  });
+  map.addLayer({
+    id: 'tdt-cluster-count', type: 'symbol', source: 'tdt-cluster-source',
+    filter: ['has', 'point_count'],
+    layout: { 'text-field': '{point_count_abbreviated}', 'text-font': ['Open Sans Semibold'], 'text-size': 12 }
+  });
+  map.addLayer({
+    id: 'tdt-cluster-unclustered', type: 'circle', source: 'tdt-cluster-source',
+    filter: ['!', ['has', 'point_count']],
+    paint: { 'circle-color': '#11B4DA', 'circle-radius': 5, 'circle-stroke-width': 1, 'circle-stroke-color': '#FFFFFF' }
+  });
+  map.on('click', 'tdt-cluster-layer', (e) => {
+    const f = map.queryRenderedFeatures(e.point, { layers: ['tdt-cluster-layer'] });
+    if (f.length > 0 && f[0].properties.cluster_id != null) {
+      map.getSource('tdt-cluster-source').getClusterExpansionZoom(f[0].properties.cluster_id)
+        .then(z => map.easeTo({ center: f[0].geometry.coordinates, zoom: z }));
+    }
+  });
+  window.__tdtClusterAdded = true;
+}
+
+function removeMarkerClusterPoc() {
+  if (!map) return;
+  try { map.removeLayer('tdt-cluster-layer'); } catch (e) {}
+  try { map.removeLayer('tdt-cluster-count'); } catch (e) {}
+  try { map.removeLayer('tdt-cluster-unclustered'); } catch (e) {}
+  try { map.removeSource('tdt-cluster-source'); } catch (e) {}
+  window.__tdtClusterAdded = false;
+}
+
+// v1.7.0 热力图（复刻 web/index.uts L1263-1302，含 heatmap-color 渐变）
+function addHeatmapPoc(points, options) {
+  if (!map) return;
+  removeHeatmapPoc();
+  if (!points || points.length === 0) return;
+  const features = points.map(p => ({
+    type: 'Feature',
+    geometry: { type: 'Point', coordinates: [p.lng, p.lat] },
+    properties: { weight: p.weight || 1 }
+  }));
+  map.addSource('tdt-heatmap-source', {
+    type: 'geojson',
+    data: { type: 'FeatureCollection', features: features }
+  });
+  map.addLayer({
+    id: 'tdt-heatmap-layer', type: 'heatmap', source: 'tdt-heatmap-source',
+    paint: {
+      'heatmap-weight': ['get', 'weight'],
+      'heatmap-radius': (options && options.radius) || 30,
+      'heatmap-opacity': (options && options.opacity) || 0.6,
+      'heatmap-color': [
+        'interpolate', ['linear'], ['heatmap-density'],
+        0, 'rgba(0, 0, 255, 0)',
+        0.2, 'rgb(0, 0, 255)',
+        0.4, 'rgb(0, 255, 0)',
+        0.6, 'rgb(255, 255, 0)',
+        0.8, 'rgb(255, 165, 0)',
+        1, 'rgb(255, 0, 0)'
+      ]
+    }
+  });
+  window.__tdtHeatmapAdded = true;
+}
+
+function removeHeatmapPoc() {
+  if (!map) return;
+  try { map.removeLayer('tdt-heatmap-layer'); } catch (e) {}
+  try { map.removeSource('tdt-heatmap-source'); } catch (e) {}
+  window.__tdtHeatmapAdded = false;
 }
 </script>
 </body>

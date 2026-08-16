@@ -235,7 +235,9 @@ export function initMap(
         try {
             const map = new mlg.Map({
                 container: container,
-                style: { version: 8, sources: {}, layers: [] },
+                // v1.7.0: glyphs 字体端点（style spec 强制校验：text-field 图层需 style 含 glyphs，
+                // 否则图层被静默拒绝，聚合数字标签不渲染——Task 10 浏览器实测发现，context7 验证）
+                style: { version: 8, glyphs: 'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf', sources: {}, layers: [] },
                 center: [currentLng, currentLat],
                 zoom: currentZoom,
                 maxZoom: 18,
@@ -1228,6 +1230,7 @@ export function addMarkerCluster(points: Array<MapClickDetail>, options?: Cluste
             filter: ['has', 'point_count'],
             layout: {
                 'text-field': '{point_count_abbreviated}',
+                'text-font': ['Open Sans Semibold'],
                 'text-size': 12
             }
         })

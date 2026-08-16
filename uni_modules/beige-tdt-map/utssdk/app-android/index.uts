@@ -133,7 +133,9 @@ function buildTiandituStyleJson(apiKey: string, activeMapType: string): string {
     const resolved = diagUrl.replace("{x}", "537").replace("{y}", "389").replace("{z}", "10")
     console.log("TDTMap: 诊断URL(浏览器打开验证key)= " + resolved)
 
-    let json = '{"version":8,"name":"tdt-tianditu","sources":{'
+    // v1.7.0: glyphs 字体端点（style spec 强制校验：text-field 图层需 style 含 glyphs，
+    // 否则符号图层被静默拒绝，聚合数字标签不渲染——Task 10 浏览器实测发现，context7 验证）
+    let json = '{"version":8,"glyphs":"https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf","name":"tdt-tianditu","sources":{'
     json += '"tdt-base":{"type":"raster","tiles":[' + buildTileUrlsJSON(base, apiKey) + '],"tileSize":256,"minzoom":1,"maxzoom":18}'
     json += ',"tdt-label":{"type":"raster","tiles":[' + buildTileUrlsJSON(label, apiKey) + '],"tileSize":256,"minzoom":1,"maxzoom":18}'
     json += '},"layers":['
@@ -1866,8 +1868,10 @@ export function addMarkerCluster(points: Array<MapClickDetail>, options?: Cluste
         const countLayer = new SymbolLayer("tdt-cluster-count", "tdt-cluster-source")
         countLayer.setProperties(
             PropertyFactory.textField(Expression.get("point_count_abbreviated")),
-            PropertyFactory.textSize(12.0.toFloat()),
-            PropertyFactory.textColor(Color.parseColor("#FFFFFF"))
+            PropertyFactory.textFont(Expression.literal("Open Sans Semibold")),
+            PropertyFactory.textSize(12.0.toFloat())
+            // 文字颜色用默认黑色（官方 cluster 示例同款）：黄色簇 #F1F075 上白字对比度差，
+            // 且 Web/iOS 端均默认黑，三端统一（Task 10 浏览器实测发现）
         )
         countLayer.setFilter(Expression.has("point_count"))
         style.addLayer(countLayer)
