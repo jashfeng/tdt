@@ -113,10 +113,15 @@ import {
   showUserLocation, getUserLocation, showMarkerInfo, hideMarkerInfo,
   addCustomTileLayer, removeCustomTileLayer,
   setMapLongClickCallback, setBearing, setTilt, getBearing, getTilt,
-  enableRotate, enableTilt, setCameraChangeCallback
+  enableRotate, enableTilt, setCameraChangeCallback,
+  // v1.7.0: 重命名导入避免与下方同名 setup 函数冲突（组合式 API 模块作用域不允许重复声明）
+  addMarkerCluster as nativeAddMarkerCluster,
+  removeMarkerCluster as nativeRemoveMarkerCluster,
+  addHeatmap as nativeAddHeatmap,
+  removeHeatmap as nativeRemoveHeatmap
 } from '@/uni_modules/beige-tdt-map'
 import globalConfig from '@/uni_modules/beige-tdt-map/config'
-import type { MapClickDetail, MapBoundsDetail, MapErrorDetail, MapSizeDetail, MapViewportDetail, MarkerClickCallback, GeocodeCallback, SearchOptions, MapLongClickCallback, CameraChangeCallback } from '@/uni_modules/beige-tdt-map'
+import type { MapClickDetail, MapBoundsDetail, MapErrorDetail, MapSizeDetail, MapViewportDetail, MarkerClickCallback, GeocodeCallback, SearchOptions, MapLongClickCallback, CameraChangeCallback, ClusterOptions, HeatmapItem, HeatmapOptions } from '@/uni_modules/beige-tdt-map'
 
 const props = defineProps({
   apiKey: { type: String, default: '' },
@@ -386,6 +391,21 @@ function zoomInOne(): void { zoomIn() }
 function zoomOutOne(): void { zoomOut() }
 function setMinZoomLevel(zoom: number): void { setMinZoom(zoom) }
 function setMaxZoomLevel(zoom: number): void { setMaxZoom(zoom) }
+
+// ═══ v1.7.0: 数据可视化（与 zoomInOne 模式一致：setup 函数名即对外 API 名，
+// 内部调用重命名导入的原生实现，规避模块作用域重复声明）═══
+function addMarkerCluster(points: Array<MapClickDetail>, options?: ClusterOptions): void {
+  nativeAddMarkerCluster(points, options)
+}
+function removeMarkerCluster(): void {
+  nativeRemoveMarkerCluster()
+}
+function addHeatmap(points: Array<HeatmapItem>, options?: HeatmapOptions): void {
+  nativeAddHeatmap(points, options)
+}
+function removeHeatmap(): void {
+  nativeRemoveHeatmap()
+}
 function panToLocation(lat: number, lng: number, zoom?: number): void {
   // v1.5.5: 日志实测 MapLibre animateCamera 动画在 UTS 集成下不推进（500ms 零进展，目标 zoom 中间值从未出现），
   // 而手势改相机正常（zoom 12→10.65 实时生效）——moveCamera 与手势同管线，改用瞬移路径
@@ -655,6 +675,7 @@ defineExpose({
   setShowUserLocation, getCurrentLocation, showMarkerInfoById, hideMarkerInfoById,
   addTileLayer, removeTileLayer,
   setMapBearing, setMapTilt, getMapBearing, getMapTilt, setRotateEnabled, setTiltEnabled,
+  addMarkerCluster, removeMarkerCluster, addHeatmap, removeHeatmap,
   isMapReady,
   doSearch, selectSearchResult, locateToCurrent,
   showBubble, hideBubble

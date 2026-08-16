@@ -50,6 +50,21 @@ type MapLongClickCallback = (detail: MapClickDetail) => void
 type CameraChangeCallback = (detail: MapClickDetail) => void
 type GeocodeCallback = (data: UTSJSONObject) => void
 
+// v1.7.0: 数据可视化类型（与 interface.uts 保持一致）
+type ClusterOptions = {
+    clusterRadius?: number
+    clusterMaxZoom?: number
+}
+type HeatmapItem = {
+    lat: number
+    lng: number
+    weight?: number
+}
+type HeatmapOptions = {
+    radius?: number
+    opacity?: number
+}
+
 type SearchOptions = {
     keyWord: string
     mapBound?: string
@@ -220,7 +235,9 @@ export function initMap(
         try {
             const map = new mlg.Map({
                 container: container,
-                style: { version: 8, sources: {}, layers: [] },
+                // v1.7.0: glyphs 字体端点（style spec 强制校验：text-field 图层需 style 含 glyphs，
+                // 否则图层被静默拒绝，聚合数字标签不渲染——Task 10 浏览器实测发现，context7 验证）
+                style: { version: 8, glyphs: 'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf', sources: {}, layers: [] },
                 center: [currentLng, currentLat],
                 zoom: currentZoom,
                 maxZoom: 18,
@@ -264,6 +281,9 @@ export function initMap(
 
             // 点击事件
             map.on('click', (e: any) => {
+                // v1.7.0: 聚合簇点击由 onClusterClick 处理（放大展开），通用 click 不重复触发（与 Android/iOS 消费事件语义一致）
+                const clusterHits = map.queryRenderedFeatures(e.point, { layers: ['tdt-cluster-layer'] })
+                if (clusterHits != null && clusterHits.length > 0) return
                 if (mapClickCallback != null) {
                     mapClickCallback({ lat: e.lngLat.lat, lng: e.lngLat.lng })
                 }
@@ -1129,4 +1149,163 @@ export function enableTilt(enabled: boolean): void {
 @UTSJS.keepAlive
 export function setCameraChangeCallback(callback: CameraChangeCallback): void {
     cameraChangeCallback = callback
+}
+
+// ═══════════════════════════════════════════════════════════
+// v1.7.0: 标记聚合（context7: MapLibre 官方 create-and-style-clusters 示例）
+// cluster:true 后引擎自动生成 point_count / cluster_id 属性；
+// 三个图层：聚合簇圆点 / 聚合簇数量文字 / 未聚合原始点
+// ═══════════════════════════════════════════════════════════
+let clusterLayerIds: Array<string> = []
+
+function removeClusterInternal(): void {
+    if (mapInstance == null) return
+    // 移除 click 监听（幂等：off 未注册的监听不报错）
+    mapInstance.off('click', 'tdt-cluster-layer', onClusterClick)
+    for (let i = 0; i < clusterLayerIds.length; i++) {
+        try { mapInstance.removeLayer(clusterLayerIds[i]) } catch (e) { /* ignore */ }
+    }
+    clusterLayerIds = []
+    try { mapInstance.removeSource('tdt-cluster-source') } catch (e) { /* ignore */ }
+}
+
+function onClusterClick(e: any): void {
+    try {
+        const features = mapInstance?.queryRenderedFeatures(e.point, { layers: ['tdt-cluster-layer'] })
+        if (features == null || features.length == 0) return
+        const clusterId = features[0].properties.cluster_id
+        if (clusterId == null) return
+        const src = mapInstance?.getSource('tdt-cluster-source') as any
+        if (src == null) return
+        src.getClusterExpansionZoom(clusterId).then((zoom: number) => {
+            const coords = features[0].geometry.coordinates
+            mapInstance?.easeTo({ center: [coords[0], coords[1]], zoom: zoom })
+        }).catch((err: any) => {
+            console.error('TDTMap Web: getClusterExpansionZoom 失败', err)
+        })
+    } catch (err: any) {
+        console.error('TDTMap Web: 聚合点击处理失败', err)
+    }
+}
+
+export function addMarkerCluster(points: Array<MapClickDetail>, options?: ClusterOptions): void {
+    if (mapInstance == null) return
+    removeClusterInternal()
+    if (points.length == 0) return
+    try {
+        const features: Array<any> = []
+        for (let i = 0; i < points.length; i++) {
+            features.push({
+                type: 'Feature',
+                geometry: { type: 'Point', coordinates: [points[i].lng, points[i].lat] },
+                properties: {}
+            })
+        }
+        mapInstance.addSource('tdt-cluster-source', {
+            type: 'geojson',
+            data: { type: 'FeatureCollection', features: features },
+            cluster: true,
+            clusterRadius: options?.clusterRadius ?? 50,
+            clusterMaxZoom: options?.clusterMaxZoom ?? 14
+        })
+        // 聚合簇圆点（step 表达式按数量分级着色/分级半径）
+        mapInstance.addLayer({
+            id: 'tdt-cluster-layer',
+            type: 'circle',
+            source: 'tdt-cluster-source',
+            filter: ['has', 'point_count'],
+            paint: {
+                'circle-color': ['step', ['get', 'point_count'], '#51BBD6', 100, '#F1F075', 750, '#F28CB1'],
+                'circle-radius': ['step', ['get', 'point_count'], 20, 100, 30, 750, 40],
+                'circle-stroke-width': 1,
+                'circle-stroke-color': '#FFFFFF'
+            }
+        })
+        clusterLayerIds.push('tdt-cluster-layer')
+        // 聚合簇数量文字
+        mapInstance.addLayer({
+            id: 'tdt-cluster-count',
+            type: 'symbol',
+            source: 'tdt-cluster-source',
+            filter: ['has', 'point_count'],
+            layout: {
+                'text-field': '{point_count_abbreviated}',
+                'text-font': ['Open Sans Semibold'],
+                'text-size': 12
+            }
+        })
+        clusterLayerIds.push('tdt-cluster-count')
+        // 未聚合的原始点
+        mapInstance.addLayer({
+            id: 'tdt-cluster-unclustered',
+            type: 'circle',
+            source: 'tdt-cluster-source',
+            filter: ['!', ['has', 'point_count']],
+            paint: {
+                'circle-color': '#11B4DA',
+                'circle-radius': 5,
+                'circle-stroke-width': 1,
+                'circle-stroke-color': '#FFFFFF'
+            }
+        })
+        clusterLayerIds.push('tdt-cluster-unclustered')
+        mapInstance.on('click', 'tdt-cluster-layer', onClusterClick)
+    } catch (e: any) {
+        console.error('TDTMap Web: addMarkerCluster 失败', e)
+    }
+}
+
+export function removeMarkerCluster(): void {
+    removeClusterInternal()
+}
+
+// ═══════════════════════════════════════════════════════════
+// v1.7.0: 热力图（context7: MapLibre 官方 heatmap 图层示例）
+// heatmap-weight 取数据 weight 属性，radius/opacity 可配
+// ═══════════════════════════════════════════════════════════
+export function addHeatmap(points: Array<HeatmapItem>, options?: HeatmapOptions): void {
+    if (mapInstance == null) return
+    removeHeatmap()
+    if (points.length == 0) return
+    try {
+        const features: Array<any> = []
+        for (let i = 0; i < points.length; i++) {
+            features.push({
+                type: 'Feature',
+                geometry: { type: 'Point', coordinates: [points[i].lng, points[i].lat] },
+                properties: { weight: points[i].weight ?? 1 }
+            })
+        }
+        mapInstance.addSource('tdt-heatmap-source', {
+            type: 'geojson',
+            data: { type: 'FeatureCollection', features: features }
+        })
+        mapInstance.addLayer({
+            id: 'tdt-heatmap-layer',
+            type: 'heatmap',
+            source: 'tdt-heatmap-source',
+            paint: {
+                'heatmap-weight': ['get', 'weight'],
+                'heatmap-radius': options?.radius ?? 30,
+                'heatmap-opacity': options?.opacity ?? 0.6,
+                'heatmap-color': [
+                    'interpolate', ['linear'], ['heatmap-density'],
+                    0, 'rgba(0, 0, 255, 0)',
+                    0.2, 'rgb(0, 0, 255)',
+                    0.4, 'rgb(0, 255, 0)',
+                    0.6, 'rgb(255, 255, 0)',
+                    0.8, 'rgb(255, 165, 0)',
+                    1, 'rgb(255, 0, 0)'
+                ]
+            }
+        })
+    } catch (e: any) {
+        console.error('TDTMap Web: addHeatmap 失败', e)
+    }
+}
+
+export function removeHeatmap(): void {
+    if (mapInstance == null) return
+    try { mapInstance.removeLayer('tdt-heatmap-layer') } catch (e) { /* ignore */ }
+    try { mapInstance.removeSource('tdt-heatmap-source') } catch (e) { /* ignore */ }
 }

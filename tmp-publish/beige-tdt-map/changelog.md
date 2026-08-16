@@ -1,5 +1,12 @@
 # beige-tdt-map 更新日志
 
+## 1.7.0（发布时填写日期）
+
+- ✨ 新增：标记聚合 `addMarkerCluster` / `removeMarkerCluster`——海量 POI 自动聚合显示，聚合簇带数量徽标，点击自动放大展开（Android/iOS/Web 走 MapLibre GeoJSON cluster，鸿蒙走华为原生 addClusterOverlay）
+- ✨ 新增：热力图 `addHeatmap` / `removeHeatmap`——密度数据可视化，支持权重、半径、透明度配置（Android/iOS/Web 走 MapLibre HeatmapLayer，鸿蒙走华为原生 addHeatmap，需 HarmonyOS 6.0+ 低版本显式报错）
+- 🐛 修复：聚合数字标签不渲染——空 style 无 glyphs 时 text-field 图层被 style spec 强制校验静默拒绝，三端 style 补 demotiles 字体端点 + 显式 text-font（浏览器实测发现）
+- 📝 文档：README 新增 v1.7.0 API 说明与示例
+
 ## 1.6.0（2026-08-16）
 
 - ✨ 新增：缩放按钮控件——Android/iOS 为 uvue 层样式（调 zoomIn/zoomOut），鸿蒙为原生 zoomControlsEnabled，Web 为原生 NavigationControl

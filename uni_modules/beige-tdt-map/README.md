@@ -27,6 +27,7 @@
 | 📡 生命周期 | `onResume` / `onPause` / `destroyMap` |
 | 🧩 内置 UI | 搜索框 / 搜索结果列表 / 定位按钮 / marker 气泡（随地图移动跟随） |
 | 🎛️ 内置控件 | 缩放按钮、比例尺、版权条（**v1.6.0 新增**） |
+| 📊 数据可视化 | 标记聚合（聚合簇带数量徽标，点击自动放大）、热力图（权重/半径/透明度）（**v1.7.0 新增**） |
 
 ---
 
@@ -259,6 +260,25 @@ mapRef.value?.setMapTilt(0)
 ```ts
 // 禁止用户旋转地图
 mapRef.value?.setRotateEnabled(false)
+```
+
+### 📊 数据可视化（v1.7.0 新增）
+
+| 方法 | 参数 | 说明 |
+|------|------|------|
+| `addMarkerCluster(points, options?)` | 点数组 + 配置 | 标记聚合（聚合簇带数量徽标，点击自动放大展开；重复调用自动重建；options 为 `{ clusterRadius?, clusterMaxZoom? }`） |
+| `removeMarkerCluster()` | 无 | 移除标记聚合图层 |
+| `addHeatmap(points, options?)` | 点数组 + 配置 | 热力图（密度可视化；options 为 `{ radius?, opacity? }`；鸿蒙需 HarmonyOS 6.0+，低版本显式报错） |
+| `removeHeatmap()` | 无 | 移除热力图图层 |
+
+```ts
+// 聚合：points 为 { lat, lng } 数组
+mapRef.value?.addMarkerCluster(points, { clusterRadius: 50, clusterMaxZoom: 14 })
+mapRef.value?.removeMarkerCluster()
+
+// 热力图：points 为 { lat, lng, weight? } 数组
+mapRef.value?.addHeatmap(heatPoints, { radius: 30, opacity: 0.6 })
+mapRef.value?.removeHeatmap()
 ```
 
 ### 覆盖物
