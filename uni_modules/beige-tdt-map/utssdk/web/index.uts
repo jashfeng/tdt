@@ -50,6 +50,21 @@ type MapLongClickCallback = (detail: MapClickDetail) => void
 type CameraChangeCallback = (detail: MapClickDetail) => void
 type GeocodeCallback = (data: UTSJSONObject) => void
 
+// v1.7.0: 数据可视化类型（与 interface.uts 保持一致）
+type ClusterOptions = {
+    clusterRadius?: number
+    clusterMaxZoom?: number
+}
+type HeatmapItem = {
+    lat: number
+    lng: number
+    weight?: number
+}
+type HeatmapOptions = {
+    radius?: number
+    opacity?: number
+}
+
 type SearchOptions = {
     keyWord: string
     mapBound?: string
@@ -1129,4 +1144,111 @@ export function enableTilt(enabled: boolean): void {
 @UTSJS.keepAlive
 export function setCameraChangeCallback(callback: CameraChangeCallback): void {
     cameraChangeCallback = callback
+}
+
+// ═══════════════════════════════════════════════════════════
+// v1.7.0: 标记聚合（context7: MapLibre 官方 create-and-style-clusters 示例）
+// cluster:true 后引擎自动生成 point_count / cluster_id 属性；
+// 三个图层：聚合簇圆点 / 聚合簇数量文字 / 未聚合原始点
+// ═══════════════════════════════════════════════════════════
+let clusterLayerIds: Array<string> = []
+
+function removeClusterInternal(): void {
+    if (mapInstance == null) return
+    // 移除 click 监听（幂等：off 未注册的监听不报错）
+    mapInstance.off('click', 'tdt-cluster-layer', onClusterClick)
+    for (let i = 0; i < clusterLayerIds.length; i++) {
+        try { mapInstance.removeLayer(clusterLayerIds[i]) } catch (e) { /* ignore */ }
+    }
+    clusterLayerIds = []
+    try { mapInstance.removeSource('tdt-cluster-source') } catch (e) { /* ignore */ }
+}
+
+function onClusterClick(e: any): void {
+    try {
+        const features = mapInstance?.queryRenderedFeatures(e.point, { layers: ['tdt-cluster-layer'] })
+        if (features == null || features.length == 0) return
+        const clusterId = features[0].properties.cluster_id
+        if (clusterId == null) return
+        const src = mapInstance?.getSource('tdt-cluster-source') as any
+        if (src == null) return
+        src.getClusterExpansionZoom(clusterId).then((zoom: number) => {
+            const coords = features[0].geometry.coordinates
+            mapInstance?.easeTo({ center: [coords[0], coords[1]], zoom: zoom })
+        }).catch((err: any) => {
+            console.error('TDTMap Web: getClusterExpansionZoom 失败', err)
+        })
+    } catch (err: any) {
+        console.error('TDTMap Web: 聚合点击处理失败', err)
+    }
+}
+
+export function addMarkerCluster(points: Array<MapClickDetail>, options?: ClusterOptions): void {
+    if (mapInstance == null) return
+    removeClusterInternal()
+    if (points.length == 0) return
+    try {
+        const features: Array<any> = []
+        for (let i = 0; i < points.length; i++) {
+            features.push({
+                type: 'Feature',
+                geometry: { type: 'Point', coordinates: [points[i].lng, points[i].lat] },
+                properties: {}
+            })
+        }
+        mapInstance.addSource('tdt-cluster-source', {
+            type: 'geojson',
+            data: { type: 'FeatureCollection', features: features },
+            cluster: true,
+            clusterRadius: options?.clusterRadius ?? 50,
+            clusterMaxZoom: options?.clusterMaxZoom ?? 14
+        })
+        // 聚合簇圆点（step 表达式按数量分级着色/分级半径）
+        mapInstance.addLayer({
+            id: 'tdt-cluster-layer',
+            type: 'circle',
+            source: 'tdt-cluster-source',
+            filter: ['has', 'point_count'],
+            paint: {
+                'circle-color': ['step', ['get', 'point_count'], '#51BBD6', 100, '#F1F075', 750, '#F28CB1'],
+                'circle-radius': ['step', ['get', 'point_count'], 20, 100, 30, 750, 40],
+                'circle-stroke-width': 1,
+                'circle-stroke-color': '#FFFFFF'
+            }
+        })
+        clusterLayerIds.push('tdt-cluster-layer')
+        // 聚合簇数量文字
+        mapInstance.addLayer({
+            id: 'tdt-cluster-count',
+            type: 'symbol',
+            source: 'tdt-cluster-source',
+            filter: ['has', 'point_count'],
+            layout: {
+                'text-field': '{point_count_abbreviated}',
+                'text-size': 12
+            }
+        })
+        clusterLayerIds.push('tdt-cluster-count')
+        // 未聚合的原始点
+        mapInstance.addLayer({
+            id: 'tdt-cluster-unclustered',
+            type: 'circle',
+            source: 'tdt-cluster-source',
+            filter: ['!', ['has', 'point_count']],
+            paint: {
+                'circle-color': '#11B4DA',
+                'circle-radius': 5,
+                'circle-stroke-width': 1,
+                'circle-stroke-color': '#FFFFFF'
+            }
+        })
+        clusterLayerIds.push('tdt-cluster-unclustered')
+        mapInstance.on('click', 'tdt-cluster-layer', onClusterClick)
+    } catch (e: any) {
+        console.error('TDTMap Web: addMarkerCluster 失败', e)
+    }
+}
+
+export function removeMarkerCluster(): void {
+    removeClusterInternal()
 }
