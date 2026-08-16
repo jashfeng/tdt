@@ -1,0 +1,7 @@
+{
+  "description": "tdt-map Web 平台配置 — 基于 MapLibre GL JS 4.7.1（CDN 动态加载）",
+  "dependencies": {
+    "maplibre-gl": "4.7.1"
+  },
+  "note": "MapLibre GL JS 通过 unpkg CDN 在运行时动态加载，无需额外配置"
+}

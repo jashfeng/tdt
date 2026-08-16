@@ -1,0 +1,639 @@
+<template>
+  <view class="page">
+    <!-- 地图组件 -->
+    <tdt-map
+      ref="mapRef"
+      class="map"
+      :latitude="39.9042"
+      :longitude="116.4075"
+      :zoom="12"
+      map-type="vec"
+      @mapReady="onMapReady"
+      @mapClick="onMapClick"
+      @mapError="onMapError"
+      @markertap="onMarkerTap"
+      @mapLongClick="onMapLongClick"
+      @cameraChange="onCameraChange"
+    />
+
+    <!-- 控制面板 -->
+    <view class="panel">
+      <scroll-view scroll-y="true" class="panel-scroll">
+        <text class="section-title">🗺️ 地图类型</text>
+        <view class="btn-row">
+          <button class="btn" @tap="changeMapType('vec')">矢量</button>
+          <button class="btn" @tap="changeMapType('img')">影像</button>
+          <button class="btn" @tap="changeMapType('ter')">地形</button>
+        </view>
+
+        <text class="section-title">🔍 视野控制</text>
+        <view class="btn-row">
+          <button class="btn" @tap="zoomInOne">放大</button>
+          <button class="btn" @tap="zoomOutOne">缩小</button>
+          <button class="btn" @tap="fitBoundsDemo">适应范围</button>
+          <button class="btn" @tap="doPlanBy">平移(50,50)</button>
+          <button class="btn" @tap="doSetViewport">多点视野</button>
+          <button class="btn" @tap="doCheckResize">刷新布局</button>
+        </view>
+
+        <text class="section-title">✋ 手势开关</text>
+        <view class="btn-row">
+          <button class="btn" @tap="setZoomEnabled(true)">允许缩放</button>
+          <button class="btn" @tap="setZoomEnabled(false)">禁止缩放</button>
+          <button class="btn" @tap="setDragEnabled(true)">允许拖拽</button>
+          <button class="btn" @tap="setDragEnabled(false)">禁止拖拽</button>
+        </view>
+
+        <text class="section-title">📍 标记点</text>
+        <view class="btn-row">
+          <button class="btn" @tap="addSingleMarker">添加标记</button>
+          <button class="btn" @tap="batchMarkers">批量标记</button>
+          <button class="btn" @tap="clearAllMarkers">清除标记</button>
+        </view>
+
+        <text class="section-title">📐 覆盖物</text>
+        <view class="btn-row">
+          <button class="btn" @tap="drawPolyline">折线</button>
+          <button class="btn" @tap="drawCircle">圆</button>
+          <button class="btn" @tap="drawRectangle">矩形</button>
+          <button class="btn" @tap="drawPolygon">多边形</button>
+          <button class="btn" @tap="drawLabel">文字标注</button>
+          <button class="btn btn-danger" @tap="clearAllOverlays">清除全部</button>
+        </view>
+
+        <text class="section-title">🎯 覆盖物管理（新增）</text>
+        <view class="btn-row">
+          <button class="btn" @tap="hideLastOverlay">隐藏最后</button>
+          <button class="btn" @tap="showLastOverlay">显示最后</button>
+          <button class="btn btn-danger" @tap="removeLastOverlay">移除最后</button>
+        </view>
+
+        <text class="section-title">🧮 信息计算（新增）</text>
+        <view class="btn-row">
+          <button class="btn" @tap="calcDistance">测距</button>
+          <button class="btn" @tap="calcViewport">最佳视野</button>
+          <button class="btn" @tap="doGetCode">坐标系</button>
+          <button class="btn" @tap="doGetSize">容器尺寸</button>
+        </view>
+
+        <text class="section-title">🌐 天地图搜索（新增）</text>
+        <view class="btn-row">
+          <button class="btn" @tap="doReverseGeocode">逆地理编码</button>
+          <button class="btn" @tap="doForwardGeocode">地理编码</button>
+          <button class="btn" @tap="doSearch">关键字搜索</button>
+          <button class="btn" @tap="doSearchNearby">周边搜索</button>
+        </view>
+
+        <text class="section-title">📍 定位（v1.3.0 新增）</text>
+        <view class="btn-row">
+          <button class="btn" @tap="showUserLoc">显示定位蓝点</button>
+          <button class="btn" @tap="hideUserLoc">隐藏定位蓝点</button>
+          <button class="btn" @tap="getUserLoc">获取当前位置</button>
+        </view>
+
+        <text class="section-title">💬 信息窗口（v1.3.0 新增）</text>
+        <view class="btn-row">
+          <button class="btn" @tap="showMarkerInfoDemo">显示信息窗</button>
+          <button class="btn" @tap="hideMarkerInfoDemo">隐藏信息窗</button>
+        </view>
+
+        <text class="section-title">🖼️ 自定义瓦片（v1.3.0 新增）</text>
+        <view class="btn-row">
+          <button class="btn" @tap="addCustomTile">添加瓦片图层</button>
+          <button class="btn btn-danger" @tap="removeCustomTile">移除瓦片图层</button>
+        </view>
+
+        <text class="section-title">🧭 坐标转换</text>
+        <view class="btn-row">
+          <button class="btn" @tap="convertCoord">GCJ02→WGS84</button>
+        </view>
+        <text v-if="coordResult.length > 0" class="result-text">{{ coordResult }}</text>
+
+        <text class="section-title">🔄 地图旋转（v1.4.0 新增）</text>
+        <view class="btn-row">
+          <button class="btn" @tap="setBearing0">正北(0°)</button>
+          <button class="btn" @tap="setBearing90">东(90°)</button>
+          <button class="btn" @tap="setBearing180">南(180°)</button>
+          <button class="btn" @tap="setBearing270">西(270°)</button>
+          <button class="btn" @tap="showBearing">查询旋转</button>
+        </view>
+
+        <text class="section-title">⛰️ 地图倾斜（v1.4.0 新增）</text>
+        <view class="btn-row">
+          <button class="btn" @tap="setTilt30">倾斜30°</button>
+          <button class="btn" @tap="setTilt60">倾斜60°</button>
+          <button class="btn" @tap="setTilt0">回正(0°)</button>
+          <button class="btn" @tap="showTilt">查询倾斜</button>
+        </view>
+
+        <text class="section-title">✋ 手势进阶（v1.4.0 新增）</text>
+        <view class="btn-row">
+          <button class="btn" @tap="setRotateEnabled(true)">允许旋转</button>
+          <button class="btn" @tap="setRotateEnabled(false)">禁止旋转</button>
+          <button class="btn" @tap="setTiltEnabledD(true)">允许倾斜</button>
+          <button class="btn" @tap="setTiltEnabledD(false)">禁止倾斜</button>
+        </view>
+
+        <text class="section-title">📸 截图 & 信息</text>
+        <view class="btn-row">
+          <button class="btn" @tap="takeSnapshot">截图</button>
+          <button class="btn" @tap="showCenter">中心坐标</button>
+          <button class="btn" @tap="showZoom">缩放级别</button>
+          <button class="btn" @tap="showBounds">视野范围</button>
+        </view>
+        <text v-if="infoText.length > 0" class="result-text">{{ infoText }}</text>
+
+        <text class="section-title">🗺️ 地图事件日志</text>
+        <text v-if="clickLog.length > 0" class="result-text">{{ clickLog }}</text>
+      </scroll-view>
+    </view>
+  </view>
+</template>
+
+<script setup lang="uts">
+import { ref } from 'vue'
+import type { MapClickDetail, MapErrorDetail, MapBoundsDetail, GeocodeCallback, SearchOptions } from '@/uni_modules/beige-tdt-map'
+
+const mapRef = ref(null as any | null)
+const coordResult = ref('')
+const infoText = ref('')
+const clickLog = ref('')
+const isReady = ref(false)
+
+// 追踪最后添加的 overlay ID（用于单个管理演示）
+let lastOverlayId: number = 0
+
+// ── 事件回调 ──
+
+function onMapReady(): void {
+  isReady.value = true
+  console.log('TDTMap Demo: 地图就绪')
+}
+
+function onMapClick(detail: MapClickDetail): void {
+  clickLog.value = '点击位置: ' + detail.lat.toFixed(6) + ', ' + detail.lng.toFixed(6)
+  console.log('TDTMap Demo: 点击', detail.lat, detail.lng)
+}
+
+function onMarkerTap(detail: MapClickDetail): void {
+  infoText.value = '标记点击: ' + detail.lat.toFixed(6) + ', ' + detail.lng.toFixed(6)
+  console.log('TDTMap Demo: 标记点击', detail.lat, detail.lng)
+}
+
+function onMapError(err: MapErrorDetail): void {
+  console.error('TDTMap Demo: 错误 [' + err.code + ']', err.message)
+}
+
+// ── v1.4.0 新增：长按事件 ──
+function onMapLongClick(detail: MapClickDetail): void {
+  // 长按位置添加标记，方便演示
+  const id = mapRef.value?.placeMarker(detail.lat, detail.lng, '长按标记') ?? 0
+  lastOverlayId = id
+  infoText.value = '长按位置: ' + detail.lat.toFixed(6) + ', ' + detail.lng.toFixed(6) + ' (已添加标记 #' + id + ')'
+  console.log('TDTMap Demo: 长按', detail.lat, detail.lng)
+}
+
+// ── v1.4.0 新增：相机变化事件 ──
+function onCameraChange(detail: MapClickDetail): void {
+  clickLog.value = '相机移动: ' + detail.lat.toFixed(6) + ', ' + detail.lng.toFixed(6)
+}
+
+// ── 地图类型 ──
+
+function changeMapType(type: string): void {
+  mapRef.value?.changeMapType(type)
+}
+
+// ── 视野 ──
+
+function zoomInOne(): void { mapRef.value?.zoomInOne() }
+function zoomOutOne(): void { mapRef.value?.zoomOutOne() }
+
+function fitBoundsDemo(): void {
+  mapRef.value?.fitToBounds(39.88, 116.38, 39.93, 116.43, 20)
+}
+
+// ── 手势 ──
+
+function setZoomEnabled(e: boolean): void { mapRef.value?.setZoomEnabled(e) }
+function setDragEnabled(e: boolean): void { mapRef.value?.setDragEnabled(e) }
+
+// ── 标记 ──
+
+function addSingleMarker(): void {
+  lastOverlayId = mapRef.value?.placeMarker(39.9142, 116.4074, '北京') ?? 0
+}
+
+function batchMarkers(): void {
+  const ids = mapRef.value?.batchMarkers([
+    { latitude: 39.9142, longitude: 116.4074 },
+    { latitude: 39.9242, longitude: 116.3974 },
+    { latitude: 39.9042, longitude: 116.4174 }
+  ])
+  if (ids != null && ids.length > 0) {
+    lastOverlayId = ids[ids.length - 1]
+  }
+}
+
+function clearAllMarkers(): void { mapRef.value?.clearAllMarkers() }
+
+// ── 覆盖物 ──
+
+function drawPolyline(): void {
+  lastOverlayId = mapRef.value?.drawPolyline([
+    { latitude: 39.9100, longitude: 116.3900 },
+    { latitude: 39.9200, longitude: 116.4000 },
+    { latitude: 39.9100, longitude: 116.4100 }
+  ], '#FF4444', 6) ?? 0
+}
+
+function drawCircle(): void {
+  lastOverlayId = mapRef.value?.drawCircle(39.9142, 116.4074, 800, '#FF6600', '#FF660044') ?? 0
+}
+
+function drawRectangle(): void {
+  lastOverlayId = mapRef.value?.drawRectangle(39.910, 116.395, 39.920, 116.415, '#3366FF', '#3366FF22') ?? 0
+}
+
+function drawPolygon(): void {
+  lastOverlayId = mapRef.value?.drawPolygon([
+    { latitude: 39.9050, longitude: 116.3850 },
+    { latitude: 39.9150, longitude: 116.3950 },
+    { latitude: 39.9100, longitude: 116.4050 },
+    { latitude: 39.9000, longitude: 116.3900 }
+  ], '#00CC66', '#00CC6633') ?? 0
+}
+
+function drawLabel(): void {
+  lastOverlayId = mapRef.value?.drawLabel(39.9142, 116.4074, '天安门') ?? 0
+}
+
+function clearAllOverlays(): void { mapRef.value?.clearAllOverlays() }
+
+// ── 新增：覆盖物单个管理 ──
+
+function hideLastOverlay(): void {
+  if (lastOverlayId > 0) {
+    mapRef.value?.hideOverlayById(lastOverlayId)
+    infoText.value = '已隐藏 overlay #' + lastOverlayId
+  }
+}
+
+function showLastOverlay(): void {
+  if (lastOverlayId > 0) {
+    mapRef.value?.showOverlayById(lastOverlayId)
+    infoText.value = '已显示 overlay #' + lastOverlayId
+  }
+}
+
+function removeLastOverlay(): void {
+  if (lastOverlayId > 0) {
+    mapRef.value?.removeOverlayById(lastOverlayId)
+    infoText.value = '已移除 overlay #' + lastOverlayId
+    lastOverlayId = 0
+  }
+}
+
+// ── 新增：地图工具 ──
+
+function doPlanBy(): void {
+  mapRef.value?.doPlanBy(50, 50)
+}
+
+function doSetViewport(): void {
+  mapRef.value?.setViewportPoints([
+    { latitude: 39.8950, longitude: 116.3950 },
+    { latitude: 39.9200, longitude: 116.4200 },
+    { latitude: 39.9050, longitude: 116.3900 }
+  ])
+}
+
+function doCheckResize(): void {
+  mapRef.value?.doCheckResize()
+  infoText.value = '已触发布局刷新'
+}
+
+// ── 新增：信息计算 ──
+
+function calcDistance(): void {
+  const start: MapClickDetail = { lat: 39.9042, lng: 116.4075 }
+  const end: MapClickDetail = { lat: 39.9142, lng: 116.4175 }
+  const dist = mapRef.value?.calculateDistance(start, end)
+  if (dist != null) {
+    infoText.value = '距离: ' + dist.toFixed(0) + ' 米'
+  }
+}
+
+function calcViewport(): void {
+  const points: Array<MapClickDetail> = [
+    { lat: 39.8900, lng: 116.3800 },
+    { lat: 39.9200, lng: 116.4200 },
+    { lat: 39.9000, lng: 116.4000 }
+  ]
+  const result = mapRef.value?.calculateViewport(points)
+  if (result != null) {
+    infoText.value = '最佳视野: center(' + result.center.lat.toFixed(4) + ',' + result.center.lng.toFixed(4) + ') zoom=' + result.zoom.toFixed(1)
+  }
+}
+
+function doGetCode(): void {
+  const code = mapRef.value?.getMapCode()
+  if (code != null) {
+    infoText.value = '坐标系: ' + code
+  }
+}
+
+function doGetSize(): void {
+  const size = mapRef.value?.getMapSize()
+  if (size != null) {
+    infoText.value = '容器尺寸: ' + size.width + ' x ' + size.height
+  }
+}
+
+// ── 新增：天地图搜索 ──
+
+function doReverseGeocode(): void {
+  const lnglat: MapClickDetail = { lat: 39.9088, lng: 116.3975 }
+  mapRef.value?.reverseGeocode(lnglat, (data: UTSJSONObject) => {
+    const raw = JSON.stringify(data)
+    console.log('逆地理编码结果:', raw)
+    // 跨运行时对象方法集不完整，官方 JSON 文档：JSON.parse 重建 + [] 下标访问
+    const obj = JSON.parse(raw) as UTSJSONObject
+    const result = obj["result"] as UTSJSONObject
+    let addr = ''
+    if (result != null) {
+      const fa = result["formatted_address"]
+      addr = fa != null ? (fa as string) : ''
+    }
+    infoText.value = '逆地理: ' + (addr.length > 0 ? addr : raw)
+  })
+}
+
+function doForwardGeocode(): void {
+  mapRef.value?.forwardGeocode('北京市东城区天安门', (data: UTSJSONObject) => {
+    console.log('地理编码结果:', JSON.stringify(data))
+    infoText.value = '地理编码: ' + JSON.stringify(data)
+  })
+}
+
+function doSearch(): void {
+  const params: SearchOptions = { keyWord: '酒店', start: '0', count: '5' }
+  mapRef.value?.keywordSearch(params, (data: UTSJSONObject) => {
+    const raw = JSON.stringify(data)
+    console.log('搜索完成:', raw)
+    // v1.5.4: v2 响应无 msg 字段，status 为对象 {infocode:1000}，结果总数在顶层 count
+    // 跨运行时对象方法集不完整，官方 JSON 文档：JSON.parse 重建 + [] 下标访问
+    const obj = JSON.parse(raw) as UTSJSONObject
+    const statusObj = obj["status"] as UTSJSONObject
+    let infocode = -1
+    if (statusObj != null) {
+      const ic = statusObj["infocode"]
+      infocode = ic != null ? (ic as number) : -1
+    }
+    const cnt = obj["count"]
+    const total = cnt != null ? (cnt as number) : 0
+    infoText.value = '搜索: infocode=' + infocode + ', 共 ' + total + ' 条'
+  })
+}
+
+function doSearchNearby(): void {
+  const params: SearchOptions = {
+    keyWord: '餐厅',
+    pointLonlat: '116.3975,39.9088',
+    queryRadius: '1000',
+    start: '0',
+    count: '5'
+  }
+  mapRef.value?.nearbySearch(params, (data: UTSJSONObject) => {
+    const raw = JSON.stringify(data)
+    console.log('周边搜索完成:', raw)
+    // v1.5.4: v2 响应无 msg 字段，status 为对象 {infocode:1000}
+    // 跨运行时对象方法集不完整，官方 JSON 文档：JSON.parse 重建 + [] 下标访问
+    const obj = JSON.parse(raw) as UTSJSONObject
+    const statusObj = obj["status"] as UTSJSONObject
+    let infocode = -1
+    if (statusObj != null) {
+      const ic = statusObj["infocode"]
+      infocode = ic != null ? (ic as number) : -1
+    }
+    const cnt = obj["count"]
+    const total = cnt != null ? (cnt as number) : 0
+    infoText.value = '周边搜索: infocode=' + infocode + ', 共 ' + total + ' 条'
+  })
+}
+
+// ── 坐标转换 ──
+
+// ── v1.3.0 新增：定位 ──
+
+function showUserLoc(): void {
+  // Android/iOS 必须运行时请求定位权限
+  // #ifdef APP-ANDROID || APP-IOS
+  uni.authorize({
+    scope: 'scope.userLocation',
+    success(): void {
+      mapRef.value?.setShowUserLocation(true)
+      infoText.value = '定位蓝点已显示'
+    },
+    fail(): void {
+      infoText.value = '定位权限被拒绝，请在系统设置中手动开启位置权限'
+    }
+  })
+  // #endif
+  // #ifndef APP-ANDROID || APP-IOS
+  mapRef.value?.setShowUserLocation(true)
+  infoText.value = '定位蓝点已显示（需系统定位权限）'
+  // #endif
+}
+
+function hideUserLoc(): void {
+  mapRef.value?.setShowUserLocation(false)
+  infoText.value = '定位蓝点已隐藏'
+}
+
+function getUserLoc(): void {
+  // Android/iOS 必须运行时请求定位权限
+  // #ifdef APP-ANDROID || APP-IOS
+  uni.authorize({
+    scope: 'scope.userLocation',
+    success(): void {
+      doGetLocation()
+    },
+    fail(): void {
+      infoText.value = '定位权限被拒绝，请在系统设置中手动开启位置权限'
+    }
+  })
+  // #endif
+  // #ifndef APP-ANDROID || APP-IOS
+  doGetLocation()
+  // #endif
+}
+
+function doGetLocation(): void {
+  mapRef.value?.getCurrentLocation((detail: MapClickDetail) => {
+    infoText.value = '当前位置: ' + detail.lat.toFixed(6) + ', ' + detail.lng.toFixed(6)
+    console.log('TDTMap Demo: 定位成功', detail.lat, detail.lng)
+  }, (err: MapErrorDetail) => {
+    infoText.value = '定位失败: ' + err.message
+    console.error('TDTMap Demo: 定位失败', err.message)
+  })
+}
+
+// ── v1.3.0 新增：信息窗口 ──
+
+let infoMarkerId: number = 0
+
+function showMarkerInfoDemo(): void {
+  // 先创建一个带 snippet 的标记
+  infoMarkerId = mapRef.value?.placeMarker(39.9142, 116.4074, '天安门广场', '北京市中心，著名景点') ?? 0
+  // 由于鸿蒙 addMarker 是异步的，需要延迟显示信息窗口
+  setTimeout(() => {
+    mapRef.value?.showMarkerInfoById(infoMarkerId)
+    infoText.value = '信息窗口已显示（标记 #' + infoMarkerId + '）'
+  }, 500)
+}
+
+function hideMarkerInfoDemo(): void {
+  if (infoMarkerId > 0) {
+    mapRef.value?.hideMarkerInfoById(infoMarkerId)
+    infoText.value = '信息窗口已隐藏（标记 #' + infoMarkerId + '）'
+  }
+}
+
+// ── v1.3.0 新增：自定义瓦片图层 ──
+
+let customTileAdded: boolean = false
+
+function addCustomTile(): void {
+  // 添加 OpenStreetMap 瓦片作为示例（注意：生产环境请替换为自己的瓦片服务）
+  mapRef.value?.addTileLayer('osm-demo', 'https://tile.openstreetmap.org/{z}/{x}/{y}.png')
+  customTileAdded = true
+  infoText.value = '已添加 OSM 瓦片图层（叠加在天地图上方）'
+}
+
+function removeCustomTile(): void {
+  mapRef.value?.removeTileLayer('osm-demo')
+  customTileAdded = false
+  infoText.value = '已移除自定义瓦片图层'
+}
+
+// ── 坐标转换 ──
+
+function convertCoord(): void {
+  // 高德坐标（GCJ02）天安门 → WGS84
+  const result = mapRef.value?.convertGcj02ToWgs84(39.9088, 116.3975)
+  if (result != null) {
+    coordResult.value = 'GCJ02 天安门 → WGS84: ' + result.lat.toFixed(6) + ', ' + result.lng.toFixed(6)
+  }
+}
+
+// ── v1.4.0 新增：地图旋转/倾斜 ──
+
+function setBearing0(): void { mapRef.value?.setMapBearing(0); infoText.value = '旋转: 0° (正北)' }
+function setBearing90(): void { mapRef.value?.setMapBearing(90); infoText.value = '旋转: 90° (东)' }
+function setBearing180(): void { mapRef.value?.setMapBearing(180); infoText.value = '旋转: 180° (南)' }
+function setBearing270(): void { mapRef.value?.setMapBearing(270); infoText.value = '旋转: 270° (西)' }
+function showBearing(): void {
+  const bearing = mapRef.value?.getMapBearing()
+  if (bearing != null) infoText.value = '当前旋转: ' + bearing.toFixed(1) + '°'
+}
+
+function setTilt0(): void { mapRef.value?.setMapTilt(0); infoText.value = '倾斜: 0° (垂直俯瞰)' }
+function setTilt30(): void { mapRef.value?.setMapTilt(30); infoText.value = '倾斜: 30°' }
+function setTilt60(): void { mapRef.value?.setMapTilt(60); infoText.value = '倾斜: 60°' }
+function showTilt(): void {
+  const tilt = mapRef.value?.getMapTilt()
+  if (tilt != null) infoText.value = '当前倾斜: ' + tilt.toFixed(1) + '°'
+}
+
+function setRotateEnabled(enabled: boolean): void { mapRef.value?.setRotateEnabled(enabled) }
+function setTiltEnabledD(enabled: boolean): void { mapRef.value?.setTiltEnabled(enabled) }
+
+// ── 截图 & 信息 ──
+
+function takeSnapshot(): void {
+  const data = mapRef.value?.takeSnapshot()
+  if (data != null) {
+    infoText.value = '截图大小: ' + data.byteLength + ' bytes'
+  } else {
+    infoText.value = '截图失败（鸿蒙不支持）'
+  }
+}
+
+function showCenter(): void {
+  const c = mapRef.value?.getCurrentCenter()
+  if (c != null) infoText.value = '中心: ' + c.lat.toFixed(4) + ', ' + c.lng.toFixed(4)
+}
+
+function showZoom(): void {
+  const z = mapRef.value?.getCurrentZoom()
+  if (z != null) infoText.value = '缩放级别: ' + z
+}
+
+function showBounds(): void {
+  const b: MapBoundsDetail = mapRef.value?.getCurrentBounds()
+  if (b != null) {
+    infoText.value = '范围: [' + b.minLat.toFixed(4) + ',' + b.minLng.toFixed(4) + '] → [' + b.maxLat.toFixed(4) + ',' + b.maxLng.toFixed(4) + ']'
+  }
+}
+</script>
+
+<style>
+.page {
+  flex: 1;
+  flex-direction: column;
+}
+
+.map {
+  flex: 1;
+  width: 100%;
+}
+
+.panel {
+  width: 100%;
+  height: 320px;
+  background-color: #ffffff;
+  border-top: 1px solid #e0e0e0;
+}
+
+.panel-scroll {
+  flex: 1;
+  padding: 10px;
+}
+
+.section-title {
+  font-size: 14px;
+  font-weight: bold;
+  color: #333;
+  margin-top: 8px;
+  margin-bottom: 4px;
+}
+
+.btn-row {
+  flex-direction: row;
+  flex-wrap: wrap;
+}
+
+.btn {
+  margin: 3px 4px;
+  padding: 4px 10px;
+  font-size: 12px;
+  background-color: #4A90D9;
+  color: #ffffff;
+  border-radius: 4px;
+  border: none;
+}
+
+.btn-danger {
+  background-color: #E74C3C;
+}
+
+.result-text {
+  font-size: 11px;
+  color: #666;
+  margin: 4px 0;
+  padding: 4px 8px;
+  background-color: #f5f5f5;
+  border-radius: 4px;
+}
+</style>

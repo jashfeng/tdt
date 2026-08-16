@@ -1,0 +1,1132 @@
+// ═══════════════════════════════════════════════════════════
+// tdt-map Web 平台实现 — 基于 MapLibre GL JS
+// 天地图 UTS 原生插件（uni-app x 蒸汽模式）
+// ═══════════════════════════════════════════════════════════
+
+// ── 类型别名（Web 平台对应） ──
+type TDMapOptions = {
+    apiKey: string
+    latitude: number
+    longitude: number
+    zoom: number
+    mapType: string
+    // v1.6.0: 控件显隐（与 interface.uts TDMapOptions 保持一致）
+    showZoomControl?: boolean
+    showScaleControl?: boolean
+}
+
+type MapClickDetail = {
+    lat: number
+    lng: number
+}
+
+type MapErrorDetail = {
+    code: number
+    message: string
+}
+
+type MapBoundsDetail = {
+    minLat: number
+    minLng: number
+    maxLat: number
+    maxLng: number
+}
+
+type MapSizeDetail = {
+    width: number
+    height: number
+}
+
+type MapViewportDetail = {
+    center: MapClickDetail
+    zoom: number
+}
+
+type MapClickCallback = (detail: MapClickDetail) => void
+type MapReadyCallback = () => void
+type MapErrorCallback = (detail: MapErrorDetail) => void
+type MarkerClickCallback = (detail: MapClickDetail) => void
+type MapLongClickCallback = (detail: MapClickDetail) => void
+type CameraChangeCallback = (detail: MapClickDetail) => void
+type GeocodeCallback = (data: UTSJSONObject) => void
+
+type SearchOptions = {
+    keyWord: string
+    mapBound?: string
+    level?: string
+    queryType?: string
+    queryRadius?: string
+    pointLonlat?: string
+    start?: string
+    count?: string
+    specifyAdminCode?: string
+}
+
+// ── 模块级状态 ──
+let mapInstance: any = null
+let currentApiKey: string = ''
+let currentMapType: string = 'vec'
+let currentLat: number = 39.9042
+let currentLng: number = 116.4075
+let currentZoom: number = 10
+
+// 覆盖物管理
+let nextOverlayId: number = 0
+let overlayMap: Map<number, OverlayEntry> = new Map()
+let markerMap: Map<number, any> = new Map()  // id → Marker 实例
+type MarkerInfo = { title: string, snippet: string }
+let markerInfoMap: Map<number, MarkerInfo> = new Map()
+let polygonList: Array<number> = []
+let polylineList: Array<number> = []
+let circleList: Array<number> = []
+let rectangleList: Array<number> = []
+let labelList: Array<number> = []
+type TileLayerInfo = { sourceId: string, layerId: string }
+let customTileLayers: Map<string, TileLayerInfo> = new Map()
+
+type OverlayEntry = {
+    type: string          // 'marker' | 'polygon' | 'polyline' | 'circle' | 'rectangle' | 'label'
+    sourceId?: string
+    layerId?: string
+    visible: boolean
+}
+
+// 回调存储
+let mapClickCallback: MapClickCallback | null = null
+let mapReadyCallback: MapReadyCallback | null = null
+let mapErrorCallback: MapErrorCallback | null = null
+let markerClickCallback: MarkerClickCallback | null = null
+let mapLongClickCallback: MapLongClickCallback | null = null
+let cameraChangeCallback: CameraChangeCallback | null = null
+
+// MapLibre GL JS 加载状态
+let maplibreLoaded: boolean = false
+let maplibreLoadPromise: Promise<void> | null = null
+
+// ── 天地图瓦片配置 ──
+const SUBDOMAINS: Array<string> = ['0', '1', '2', '3', '4', '5', '6', '7']
+type TdtLayerConfig = { map: string, anno: string }
+const LAYER_CONFIG: Map<string, TdtLayerConfig> = new Map([
+    ['vec', { map: 'vec_w', anno: 'cva_w' }],
+    ['img', { map: 'img_w', anno: 'cia_w' }],
+    ['ter', { map: 'ter_w', anno: 'cta_w' }]
+])
+
+const TDT_API_BASE: string = 'https://api.tianditu.gov.cn'
+
+// ═══════════════════════════════════════════════════════════
+// MapLibre GL JS 动态加载
+// ═══════════════════════════════════════════════════════════
+
+function loadMapLibreGL(): Promise<void> {
+    if (maplibreLoaded) return Promise.resolve()
+    if (maplibreLoadPromise != null) return maplibreLoadPromise
+
+    maplibreLoadPromise = new Promise<void>((resolve, reject) => {
+        // 检查是否已加载
+        if (typeof (window as any).maplibregl !== 'undefined') {
+            maplibreLoaded = true
+            resolve()
+            return
+        }
+
+        // 加载 CSS
+        const link = document.createElement('link')
+        link.rel = 'stylesheet'
+        link.href = 'https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css'
+        document.head.appendChild(link)
+
+        // 加载 JS
+        const script = document.createElement('script')
+        script.src = 'https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js'
+        script.onload = () => {
+            maplibreLoaded = true
+            resolve()
+        }
+        script.onerror = () => {
+            maplibreLoadPromise = null
+            reject(new Error('MapLibre GL JS 加载失败，请检查网络连接'))
+        }
+        document.head.appendChild(script)
+    })
+
+    return maplibreLoadPromise
+}
+
+function getMapLibre(): any {
+    if (!maplibreLoaded) return null
+    return (window as any).maplibregl
+}
+
+// ── 瓦片 URL 构建 ──
+
+function buildTileUrl(layerType: string, key: string): string {
+    const s = SUBDOMAINS[Math.floor(Math.random() * 8)]
+    return `https://t${s}.tianditu.gov.cn/DataServer?T=${layerType}&x={x}&y={y}&l={z}&tk=${key}`
+}
+
+// ── 生成唯一 overlay ID ──
+function genOverlayId(): number {
+    nextOverlayId++
+    return nextOverlayId
+}
+
+// ═══════════════════════════════════════════════════════════
+// 核心地图函数
+// ═══════════════════════════════════════════════════════════
+
+@UTSJS.keepAlive
+export function initMap(
+    container: any,  // Web: DOM 元素
+    options: TDMapOptions,
+    onClick: MapClickCallback,
+    onReady: MapReadyCallback,
+    onError: MapErrorCallback
+): void {
+    currentApiKey = options.apiKey
+    currentMapType = options.mapType ?? 'vec'
+    currentLat = options.latitude
+    currentLng = options.longitude
+    currentZoom = options.zoom
+
+    mapClickCallback = onClick
+    mapReadyCallback = onReady
+    mapErrorCallback = onError
+
+    loadMapLibreGL().then(() => {
+        // v1.6.0: 防御重复初始化（组件重建场景）——旧 map 先销毁，避免双地图叠加
+        // （控件实例挂在 map 对象上，map.remove() 会一并清理，无需单独 removeControl）
+        if (mapInstance != null) {
+            try { mapInstance.remove() } catch (e: any) { /* ignore */ }
+            mapInstance = null
+        }
+
+        const mlg = getMapLibre()
+        if (mlg == null) {
+            if (mapErrorCallback != null) {
+                mapErrorCallback({ code: 4, message: 'MapLibre GL JS 未加载' })
+            }
+            return
+        }
+
+        const layerCfg = LAYER_CONFIG.get(currentMapType)
+        if (layerCfg == null) {
+            if (mapErrorCallback != null) {
+                mapErrorCallback({ code: 4, message: '未知地图类型: ' + currentMapType })
+            }
+            return
+        }
+
+        try {
+            const map = new mlg.Map({
+                container: container,
+                style: { version: 8, sources: {}, layers: [] },
+                center: [currentLng, currentLat],
+                zoom: currentZoom,
+                maxZoom: 18,
+                minZoom: 1,
+                attributionControl: false
+            })
+
+            map.on('load', () => {
+                // 底图
+                map.addSource('tdt-base', {
+                    type: 'raster',
+                    tiles: [buildTileUrl(layerCfg.map, currentApiKey)],
+                    tileSize: 256,
+                    maxzoom: 18,
+                    minzoom: 1
+                })
+                map.addLayer({
+                    id: 'tdt-base-layer',
+                    type: 'raster',
+                    source: 'tdt-base'
+                })
+
+                // 注记
+                map.addSource('tdt-anno', {
+                    type: 'raster',
+                    tiles: [buildTileUrl(layerCfg.anno, currentApiKey)],
+                    tileSize: 256,
+                    maxzoom: 18,
+                    minzoom: 1
+                })
+                map.addLayer({
+                    id: 'tdt-anno-layer',
+                    type: 'raster',
+                    source: 'tdt-anno'
+                })
+
+                if (mapReadyCallback != null) {
+                    mapReadyCallback()
+                }
+            })
+
+            // 点击事件
+            map.on('click', (e: any) => {
+                if (mapClickCallback != null) {
+                    mapClickCallback({ lat: e.lngLat.lat, lng: e.lngLat.lng })
+                }
+            })
+
+            // 相机移动完成
+            map.on('moveend', () => {
+                const c = map.getCenter()
+                currentLat = c.lat
+                currentLng = c.lng
+                currentZoom = map.getZoom()
+                if (cameraChangeCallback != null) {
+                    cameraChangeCallback({ lat: c.lat, lng: c.lng })
+                }
+            })
+
+            // 长按：mousedown 800ms
+            let longPressTimer: any = null
+            map.on('mousedown', (e: any) => {
+                longPressTimer = setTimeout(() => {
+                    if (mapLongClickCallback != null) {
+                        mapLongClickCallback({ lat: e.lngLat.lat, lng: e.lngLat.lng })
+                    }
+                }, 800)
+            })
+            map.on('mouseup', () => { if (longPressTimer != null) { clearTimeout(longPressTimer); longPressTimer = null } })
+            map.on('mousemove', () => { if (longPressTimer != null) { clearTimeout(longPressTimer); longPressTimer = null } })
+
+            // 瓦片加载错误
+            map.on('error', (e: any) => {
+                console.error('TDTMap Web: 瓦片加载错误', e)
+            })
+
+            // v1.6.0: 隐藏 MapLibre 原生 logo —— GL JS 无官方 logoEnabled 选项（仅有 logoPosition 移位），
+            // logo 默认左下角会与 uvue 版权条重叠；MapLibre BSD-3 许可不强制显示。
+            // CSS 注入隐藏（幂等：按 id 查重）
+            if (document.getElementById('tdt-hide-logo-style') == null) {
+                const hideLogoStyle = document.createElement('style')
+                hideLogoStyle.id = 'tdt-hide-logo-style'
+                hideLogoStyle.textContent = '.maplibregl-ctrl-logo { display: none !important; }'
+                document.head.appendChild(hideLogoStyle)
+            }
+
+            // v1.6.0: 缩放按钮与比例尺 —— context7 验证：同位置 bottom-right 多控件由
+            // MapLibre GL JS 自动堆叠排列，不重叠。控件实例挂在 map 对象上
+            // （非模块级变量），多地图实例场景无污染。
+            if (options.showZoomControl !== false) {
+                const navControl = new mlg.NavigationControl({ showCompass: false })
+                map.addControl(navControl, 'bottom-right')
+                map.tdtNavControl = navControl
+            }
+            if (options.showScaleControl !== false) {
+                const scaleControl = new mlg.ScaleControl({ maxWidth: 100 })
+                map.addControl(scaleControl, 'bottom-right')
+                map.tdtScaleControl = scaleControl
+            }
+
+            mapInstance = map
+        } catch (err: any) {
+            console.error('TDTMap Web: initMap 失败', err)
+            if (mapErrorCallback != null) {
+                mapErrorCallback({ code: 4, message: '地图初始化失败: ' + (err.message ?? String(err)) })
+            }
+        }
+    }).catch((err) => {
+        console.error('TDTMap Web: MapLibre GL JS 加载失败', err)
+        if (mapErrorCallback != null) {
+            mapErrorCallback({ code: 2, message: 'MapLibre GL JS 加载失败' })
+        }
+    })
+}
+
+export function setCenter(lat: number, lng: number): void {
+    if (mapInstance == null) return
+    currentLat = lat
+    currentLng = lng
+    mapInstance.setCenter([lng, lat])
+}
+
+export function setZoom(zoom: number): void {
+    if (mapInstance == null) return
+    currentZoom = zoom
+    mapInstance.setZoom(zoom)
+}
+
+export function getCenter(): MapClickDetail {
+    if (mapInstance == null) return { lat: currentLat, lng: currentLng }
+    const c = mapInstance.getCenter()
+    return { lat: c.lat, lng: c.lng }
+}
+
+export function getZoom(): number {
+    if (mapInstance == null) return currentZoom
+    return mapInstance.getZoom()
+}
+
+export function fitBounds(minLat: number, minLng: number, maxLat: number, maxLng: number, padding: number): void {
+    if (mapInstance == null) return
+    mapInstance.fitBounds(
+        [[minLng, minLat], [maxLng, maxLat]],
+        { padding: padding, maxZoom: 18 }
+    )
+}
+
+export function switchMapType(mapType: string): void {
+    if (mapInstance == null) return
+    const cfg = LAYER_CONFIG.get(mapType)
+    if (cfg == null) return
+    currentMapType = mapType
+
+    try {
+        const baseSrc = mapInstance.getSource('tdt-base')
+        if (baseSrc != null) {
+            baseSrc.setTiles([buildTileUrl(cfg.map, currentApiKey)])
+        }
+        const annoSrc = mapInstance.getSource('tdt-anno')
+        if (annoSrc != null) {
+            annoSrc.setTiles([buildTileUrl(cfg.anno, currentApiKey)])
+        }
+    } catch (e) {
+        console.error('TDTMap Web: switchMapType 失败', e)
+    }
+}
+
+export function snapshot(): ArrayBuffer {
+    if (mapInstance == null) {
+        if (mapErrorCallback != null) {
+            mapErrorCallback({ code: 4, message: '地图未初始化' })
+        }
+        return new ArrayBuffer(0)
+    }
+    try {
+        const canvas = mapInstance.getCanvas()
+        const dataUrl = canvas.toDataURL('image/png')
+        // dataUrl 转 ArrayBuffer — 简化处理：返回 base64 前缀后的字节
+        const base64 = dataUrl.split(',')[1]
+        const binaryStr = atob(base64)
+        const bytes = new Uint8Array(binaryStr.length)
+        for (let i = 0; i < binaryStr.length; i++) {
+            bytes[i] = binaryStr.charCodeAt(i)
+        }
+        return bytes.buffer as ArrayBuffer
+    } catch (e: any) {
+        console.error('TDTMap Web: snapshot 失败', e)
+        return new ArrayBuffer(0)
+    }
+}
+
+export function onResume(): void { /* Web 无需原生生命周期 */ }
+export function onPause(): void { /* Web 无需原生生命周期 */ }
+
+export function destroyMap(): void {
+    if (mapInstance != null) {
+        try { mapInstance.remove() } catch (e) { /* ignore */ }
+        mapInstance = null
+    }
+    // 清理状态
+    overlayMap.clear()
+    markerMap.clear()
+    markerInfoMap.clear()
+    customTileLayers.clear()
+    polygonList = []
+    polylineList = []
+    circleList = []
+    rectangleList = []
+    labelList = []
+    nextOverlayId = 0
+    mapClickCallback = null
+    mapReadyCallback = null
+    mapErrorCallback = null
+    markerClickCallback = null
+    mapLongClickCallback = null
+    cameraChangeCallback = null
+}
+
+// ── 缩放控制 ──
+export function zoomIn(): void { if (mapInstance != null) mapInstance.zoomIn() }
+export function zoomOut(): void { if (mapInstance != null) mapInstance.zoomOut() }
+export function setMinZoom(zoom: number): void { if (mapInstance != null) mapInstance.setMinZoom(zoom) }
+export function setMaxZoom(zoom: number): void { if (mapInstance != null) mapInstance.setMaxZoom(zoom) }
+
+// ── 视野移动 ──
+export function panTo(lat: number, lng: number, zoom?: number): void {
+    if (mapInstance == null) return
+    const opts: any = { center: [lng, lat] }
+    if (zoom != null) opts.zoom = zoom
+    mapInstance.flyTo(opts)
+}
+export function centerAndZoom(lat: number, lng: number, zoom: number): void {
+    if (mapInstance == null) return
+    currentLat = lat; currentLng = lng; currentZoom = zoom
+    mapInstance.setCenter([lng, lat])
+    mapInstance.setZoom(zoom)
+}
+
+// ── 手势控制 ──
+export function enableZoom(enabled: boolean): void {
+    if (mapInstance == null) return
+    if (enabled) { mapInstance.scrollZoom.enable() } else { mapInstance.scrollZoom.disable() }
+}
+export function enableDrag(enabled: boolean): void {
+    if (mapInstance == null) return
+    if (enabled) { mapInstance.dragPan.enable() } else { mapInstance.dragPan.disable() }
+}
+
+// ── 范围限制 ──
+export function setMaxBounds(minLat: number, minLng: number, maxLat: number, maxLng: number): void {
+    if (mapInstance == null) return
+    mapInstance.setMaxBounds([[minLng, minLat], [maxLng, maxLat]])
+}
+
+export function getBounds(): MapBoundsDetail {
+    if (mapInstance == null) return { minLat: 0, minLng: 0, maxLat: 0, maxLng: 0 }
+    const b = mapInstance.getBounds()
+    return {
+        minLat: b.getSouth(),
+        minLng: b.getWest(),
+        maxLat: b.getNorth(),
+        maxLng: b.getEast()
+    }
+}
+
+// ═══════════════════════════════════════════════════════════
+// 坐标转换：GCJ02 → WGS84（纯算法，三端一致）
+// ═══════════════════════════════════════════════════════════
+
+const PI: number = 3.141592653589793
+const A: number = 6378245.0
+const EE: number = 0.006693421622965943
+
+function isOutOfChina(lat: number, lng: number): boolean {
+    return lng < 72.004 || lng > 137.8347 || lat < 0.8293 || lat > 55.8271
+}
+
+function transformLat(x: number, y: number): number {
+    let ret = -100.0 + 2.0 * x + 3.0 * y + 0.2 * y * y + 0.1 * x * y + 0.2 * Math.sqrt(Math.abs(x))
+    ret += (20.0 * Math.sin(6.0 * x * PI) + 20.0 * Math.sin(2.0 * x * PI)) * 2.0 / 3.0
+    ret += (20.0 * Math.sin(y * PI) + 40.0 * Math.sin(y / 3.0 * PI)) * 2.0 / 3.0
+    ret += (160.0 * Math.sin(y / 12.0 * PI) + 320.0 * Math.sin(y * PI / 30.0)) * 2.0 / 3.0
+    return ret
+}
+
+function transformLng(x: number, y: number): number {
+    let ret = 300.0 + x + 2.0 * y + 0.1 * x * x + 0.1 * x * y + 0.1 * Math.sqrt(Math.abs(x))
+    ret += (20.0 * Math.sin(6.0 * x * PI) + 20.0 * Math.sin(2.0 * x * PI)) * 2.0 / 3.0
+    ret += (20.0 * Math.sin(x * PI) + 40.0 * Math.sin(x / 3.0 * PI)) * 2.0 / 3.0
+    ret += (150.0 * Math.sin(x / 12.0 * PI) + 300.0 * Math.sin(x / 30.0 * PI)) * 2.0 / 3.0
+    return ret
+}
+
+export function gcj02ToWgs84(lat: number, lng: number): MapClickDetail {
+    if (isOutOfChina(lat, lng)) return { lat: lat, lng: lng }
+    let dLat = transformLat(lng - 105.0, lat - 35.0)
+    let dLng = transformLng(lng - 105.0, lat - 35.0)
+    const radLat = lat / 180.0 * PI
+    let magic = Math.sin(radLat)
+    magic = 1 - EE * magic * magic
+    const sqrtMagic = Math.sqrt(magic)
+    dLat = (dLat * 180.0) / ((A * (1 - EE)) / (magic * sqrtMagic) * PI)
+    dLng = (dLng * 180.0) / (A / sqrtMagic * Math.cos(radLat) * PI)
+    return { lat: lat - dLat, lng: lng - dLng }
+}
+
+// ═══════════════════════════════════════════════════════════
+// 覆盖物 — 标记点
+// ═══════════════════════════════════════════════════════════
+
+export function addMarker(lat: number, lng: number, title: string, snippet?: string): number {
+    if (mapInstance == null) return 0
+    const mlg = getMapLibre()
+    if (mlg == null) return 0
+
+    const id = genOverlayId()
+    try {
+        const popup = new mlg.Popup({ offset: 25 })
+            .setHTML('<b>' + title + '</b>' + (snippet != null && snippet.length > 0 ? '<br/>' + snippet : ''))
+
+        const marker = new mlg.Marker({ color: '#FF4444' })
+            .setLngLat([lng, lat])
+            .setPopup(popup)
+            .addTo(mapInstance)
+
+        markerMap.set(id, marker)
+        const entry: OverlayEntry = { type: 'marker', visible: true }
+        overlayMap.set(id, entry)
+
+        if (snippet != null && snippet.length > 0) {
+            markerInfoMap.set(id, { title: title, snippet: snippet })
+        }
+    } catch (e: any) {
+        console.error('TDTMap Web: addMarker 失败', e)
+        return 0
+    }
+    return id
+}
+
+export function clearMarkers(): void {
+    if (mapInstance == null) return
+    markerMap.forEach((marker, id) => {
+        try { marker.remove() } catch (e) { /* ignore */ }
+        overlayMap.delete(id)
+        markerInfoMap.delete(id)
+    })
+    markerMap.clear()
+    polygonList = polygonList.filter(id => overlayMap.get(id)?.type !== 'marker')
+}
+
+export function setMarkers(markers: Array<MapClickDetail>): Array<number> {
+    const ids: Array<number> = []
+    for (let i = 0; i < markers.length; i++) {
+        const id = addMarker(markers[i].lat, markers[i].lng, '', undefined)
+        if (id > 0) ids.push(id)
+    }
+    return ids
+}
+
+// ═══════════════════════════════════════════════════════════
+// 覆盖物 — 几何图形（通过 GeoJSON source + layer）
+// ═══════════════════════════════════════════════════════════
+
+function addGeoJSONOverlay(
+    type: string, geojson: any, layerPaint: any, layerLayout?: any
+): number {
+    if (mapInstance == null) return 0
+    const id = genOverlayId()
+    const sourceId = 'overlay-src-' + id
+    const layerId = 'overlay-layer-' + id
+
+    try {
+        mapInstance.addSource(sourceId, {
+            type: 'geojson',
+            data: geojson
+        })
+        const layerDef: any = { id: layerId, type: type, source: sourceId, paint: layerPaint }
+        if (layerLayout != null) layerDef.layout = layerLayout
+        mapInstance.addLayer(layerDef)
+        overlayMap.set(id, { type: type, sourceId: sourceId, layerId: layerId, visible: true })
+    } catch (e: any) {
+        console.error('TDTMap Web: addGeoJSONOverlay 失败', e)
+        return 0
+    }
+    return id
+}
+
+export function addPolygon(points: Array<MapClickDetail>, color: string, fillColor: string): number {
+    const coords: Array<Array<number>> = []
+    for (let i = 0; i < points.length; i++) {
+        coords.push([points[i].lng, points[i].lat])
+    }
+    // 闭合多边形
+    if (coords.length > 0) {
+        const first = coords[0]
+        const last = coords[coords.length - 1]
+        if (first[0] !== last[0] || first[1] !== last[1]) {
+            coords.push([first[0], first[1]])
+        }
+    }
+    const geojson: any = { type: 'Feature', geometry: { type: 'Polygon', coordinates: [coords] } }
+    const id = addGeoJSONOverlay('fill', geojson, {
+        'fill-color': fillColor,
+        'fill-outline-color': color,
+        'fill-opacity': 0.5
+    })
+    if (id > 0) polygonList.push(id)
+    return id
+}
+
+export function clearPolygons(): void {
+    if (mapInstance == null) return
+    polygonList.forEach(id => { removeOverlayInternal(id) })
+    polygonList = []
+}
+
+export function addPolyline(points: Array<MapClickDetail>, color: string, width: number): number {
+    const coords: Array<Array<number>> = []
+    for (let i = 0; i < points.length; i++) {
+        coords.push([points[i].lng, points[i].lat])
+    }
+    const geojson: any = { type: 'Feature', geometry: { type: 'LineString', coordinates: coords } }
+    const id = addGeoJSONOverlay('line', geojson, {
+        'line-color': color,
+        'line-width': width,
+        'line-opacity': 0.8
+    })
+    if (id > 0) polylineList.push(id)
+    return id
+}
+
+export function addCircle(lat: number, lng: number, radius: number, color: string, fillColor: string): number {
+    // 用 GeoJSON circle 近似：多个点模拟圆
+    const coords: Array<Array<number>> = []
+    const segments = 64
+    const radiusDeg = radius / 111320.0  // 米→度（粗略近似）
+    for (let i = 0; i <= segments; i++) {
+        const angle = (i / segments) * 2.0 * Math.PI
+        coords.push([lng + radiusDeg * Math.cos(angle), lat + radiusDeg * Math.sin(angle)])
+    }
+    const geojson: any = { type: 'Feature', geometry: { type: 'Polygon', coordinates: [coords] } }
+    const id = addGeoJSONOverlay('fill', geojson, {
+        'fill-color': fillColor,
+        'fill-outline-color': color,
+        'fill-opacity': 0.5
+    })
+    if (id > 0) circleList.push(id)
+    return id
+}
+
+export function addRectangle(minLat: number, minLng: number, maxLat: number, maxLng: number, color: string, fillColor: string): number {
+    const coords: Array<Array<number>> = [
+        [minLng, minLat], [maxLng, minLat], [maxLng, maxLat], [minLng, maxLat], [minLng, minLat]
+    ]
+    const geojson: any = { type: 'Feature', geometry: { type: 'Polygon', coordinates: [coords] } }
+    const id = addGeoJSONOverlay('fill', geojson, {
+        'fill-color': fillColor,
+        'fill-outline-color': color,
+        'fill-opacity': 0.5
+    })
+    if (id > 0) rectangleList.push(id)
+    return id
+}
+
+export function addLabel(lat: number, lng: number, text: string): number {
+    if (mapInstance == null) return 0
+    const mlg = getMapLibre()
+    if (mlg == null) return 0
+
+    const id = genOverlayId()
+    try {
+        const marker = new mlg.Marker({ color: '#3366FF' })
+            .setLngLat([lng, lat])
+            .setPopup(new mlg.Popup().setText(text))
+            .addTo(mapInstance)
+        markerMap.set(id, marker)
+        overlayMap.set(id, { type: 'label', visible: true })
+    } catch (e: any) {
+        console.error('TDTMap Web: addLabel 失败', e)
+        return 0
+    }
+    if (id > 0) labelList.push(id)
+    return id
+}
+
+// ═══════════════════════════════════════════════════════════
+// 覆盖物管理
+// ═══════════════════════════════════════════════════════════
+
+function removeOverlayInternal(id: number): void {
+    const entry = overlayMap.get(id)
+    if (entry == null) return
+
+    if (entry.type === 'marker' || entry.type === 'label') {
+        const marker = markerMap.get(id)
+        if (marker != null) {
+            try { marker.remove() } catch (e) { /* ignore */ }
+            markerMap.delete(id)
+        }
+        markerInfoMap.delete(id)
+    } else {
+        const layerId = entry.layerId
+        const sourceId = entry.sourceId
+        if (layerId != null && mapInstance != null) {
+            try { if (mapInstance.getLayer(layerId) != null) mapInstance.removeLayer(layerId) } catch (e) { /* ignore */ }
+        }
+        if (sourceId != null && mapInstance != null) {
+            try { if (mapInstance.getSource(sourceId) != null) mapInstance.removeSource(sourceId) } catch (e) { /* ignore */ }
+        }
+    }
+    overlayMap.delete(id)
+}
+
+export function removeOverlay(id: number): void {
+    removeOverlayInternal(id)
+    // 清理类型列表
+    polygonList = polygonList.filter(x => x !== id)
+    polylineList = polylineList.filter(x => x !== id)
+    circleList = circleList.filter(x => x !== id)
+    rectangleList = rectangleList.filter(x => x !== id)
+    labelList = labelList.filter(x => x !== id)
+}
+
+export function showOverlay(id: number): void {
+    const entry = overlayMap.get(id)
+    if (entry == null || mapInstance == null) return
+
+    if (entry.type === 'marker' || entry.type === 'label') {
+        const marker = markerMap.get(id)
+        if (marker != null) marker.addTo(mapInstance)
+    } else if (entry.layerId != null) {
+        try {
+            mapInstance.setLayoutProperty(entry.layerId, 'visibility', 'visible')
+        } catch (e) { /* ignore */ }
+    }
+    entry.visible = true
+}
+
+export function hideOverlay(id: number): void {
+    const entry = overlayMap.get(id)
+    if (entry == null || mapInstance == null) return
+
+    if (entry.type === 'marker' || entry.type === 'label') {
+        const marker = markerMap.get(id)
+        if (marker != null) {
+            try { marker.remove() } catch (e) { /* ignore */ }
+        }
+    } else if (entry.layerId != null) {
+        try {
+            mapInstance.setLayoutProperty(entry.layerId, 'visibility', 'none')
+        } catch (e) { /* ignore */ }
+    }
+    entry.visible = false
+}
+
+export function clearOverlays(): void {
+    if (mapInstance == null) return
+    overlayMap.forEach((entry, id) => {
+        removeOverlayInternal(id)
+    })
+    overlayMap.clear()
+    markerMap.clear()
+    markerInfoMap.clear()
+    polygonList = []
+    polylineList = []
+    circleList = []
+    rectangleList = []
+    labelList = []
+    // 清理自定义瓦片
+    customTileLayers.forEach((v, k) => { removeCustomTileLayerInternal(k) })
+    customTileLayers.clear()
+}
+
+// ── 标记点击事件 ──
+@UTSJS.keepAlive
+export function setMarkerClickCallback(callback: MarkerClickCallback): void {
+    markerClickCallback = callback
+    // 为已存在的 marker 绑定 click（新 marker 在 addMarker 中绑定）
+    markerMap.forEach((marker, id) => {
+        const el = marker.getElement()
+        if (el != null && callback != null) {
+            el.addEventListener('click', () => {
+                const lngLat = marker.getLngLat()
+                callback({ lat: lngLat.lat, lng: lngLat.lng })
+            })
+        }
+    })
+}
+
+// ═══════════════════════════════════════════════════════════
+// 地图工具
+// ═══════════════════════════════════════════════════════════
+
+export function checkResize(): void {
+    if (mapInstance != null) mapInstance.resize()
+}
+
+export function planBy(x: number, y: number): void {
+    if (mapInstance != null) mapInstance.panBy([x, y])
+}
+
+export function setViewport(points: Array<MapClickDetail>): void {
+    if (mapInstance == null || points.length === 0) return
+    const bounds = new ((window as any).maplibregl).LngLatBounds()
+    for (let i = 0; i < points.length; i++) {
+        bounds.extend([points[i].lng, points[i].lat])
+    }
+    mapInstance.fitBounds(bounds, { padding: 40, maxZoom: 18 })
+}
+
+export function getSize(): MapSizeDetail {
+    if (mapInstance == null) return { width: 0, height: 0 }
+    const canvas = mapInstance.getCanvas()
+    return { width: canvas.clientWidth, height: canvas.clientHeight }
+}
+
+export function getDistance(start: MapClickDetail, end: MapClickDetail): number {
+    // Haversine formula
+    const R = 6371000.0
+    const dLat = (end.lat - start.lat) * PI / 180.0
+    const dLng = (end.lng - start.lng) * PI / 180.0
+    const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+        Math.cos(start.lat * PI / 180.0) * Math.cos(end.lat * PI / 180.0) *
+        Math.sin(dLng / 2) * Math.sin(dLng / 2)
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+    return R * c
+}
+
+export function getViewport(points: Array<MapClickDetail>): MapViewportDetail {
+    if (points.length === 0) return { center: { lat: 0, lng: 0 }, zoom: 0 }
+    if (points.length === 1) return { center: points[0], zoom: 15 }
+
+    let minLat = points[0].lat; let maxLat = points[0].lat
+    let minLng = points[0].lng; let maxLng = points[0].lng
+    for (let i = 1; i < points.length; i++) {
+        if (points[i].lat < minLat) minLat = points[i].lat
+        if (points[i].lat > maxLat) maxLat = points[i].lat
+        if (points[i].lng < minLng) minLng = points[i].lng
+        if (points[i].lng > maxLng) maxLng = points[i].lng
+    }
+    const centerLat = (minLat + maxLat) / 2.0
+    const centerLng = (minLng + maxLng) / 2.0
+    const spanLat = Math.abs(maxLat - minLat)
+    const spanLng = Math.abs(maxLng - minLng)
+    const maxSpan = spanLat > spanLng ? spanLat : spanLng
+    let zoom = 15
+    if (maxSpan > 0.0001) zoom = Math.floor(Math.log2(360.0 / maxSpan)) + 1
+    if (zoom > 18) zoom = 18
+    if (zoom < 3) zoom = 3
+    return { center: { lat: centerLat, lng: centerLng }, zoom: zoom }
+}
+
+export function getCode(): string {
+    return 'EPSG:4326'
+}
+
+// ═══════════════════════════════════════════════════════════
+// 天地图 Web API
+// ═══════════════════════════════════════════════════════════
+
+function buildTdtApiUrl(endpoint: string, params: Map<string, string>): string {
+    let url = TDT_API_BASE + endpoint + '?'
+    params.set('tk', currentApiKey)
+    let first = true
+    params.forEach((value, key) => {
+        if (!first) url += '&'
+        url += encodeURIComponent(key) + '=' + encodeURIComponent(value)
+        first = false
+    })
+    return url
+}
+
+function tdtHttpRequest(endpoint: string, params: Map<string, string>, callback: GeocodeCallback): void {
+    const url = buildTdtApiUrl(endpoint, params)
+    fetch(url)
+        .then(response => response.json())
+        .then(json => {
+            if (callback != null) {
+                // 将 JS object 包装为 UTSJSONObject
+                const utsObj = new UTSJSONObject(JSON.stringify(json))
+                callback(utsObj)
+            }
+        })
+        .catch(err => {
+            console.error('TDTMap Web: API 请求失败', endpoint, err)
+            if (callback != null) {
+                const utsObj = new UTSJSONObject(JSON.stringify({ status: '0', msg: '网络请求失败' }))
+                callback(utsObj)
+            }
+        })
+}
+
+@UTSJS.keepAlive
+export function geocode_getLocation(lnglat: MapClickDetail, callback: GeocodeCallback): void {
+    const params = new Map<string, string>()
+    params.set('lon', lnglat.lng.toString())
+    params.set('lat', lnglat.lat.toString())
+    params.set('ver', '1')
+    tdtHttpRequest('/geocoder', params, callback)
+}
+
+@UTSJS.keepAlive
+export function geocode_getPoint(address: string, callback: GeocodeCallback): void {
+    const params = new Map<string, string>()
+    params.set('address', address)
+    params.set('ver', '1')
+    tdtHttpRequest('/geocoder', params, callback)
+}
+
+function buildSearchParams(opt: SearchOptions): Map<string, string> {
+    const params = new Map<string, string>()
+    // v1.5.4: 天地图老 /search 接口已下线（404），改用官方「地名搜索2.0」/v2/search：
+    // queryType 必填且仅 12（行政区划搜索）可用；specify 必填（行政区国标码，默认 156000000=中国）；
+    // postStr 为 JSON 字符串整体传参（v2 接口不再接受 keyWord/mapBound 等平铺 query 参数）
+    const specify = opt.specifyAdminCode != null && opt.specifyAdminCode.length > 0 ? opt.specifyAdminCode : '156000000'
+    let postJson = '{"keyWord":"' + opt.keyWord + '","queryType":"12","specify":"' + specify + '"'
+    if (opt.start != null) postJson += ',"start":"' + opt.start + '"'
+    if (opt.count != null) postJson += ',"count":"' + opt.count + '"'
+    postJson += '}'
+    params.set('postStr', postJson)
+    params.set('type', 'query')
+    return params
+}
+
+@UTSJS.keepAlive
+export function search(params: SearchOptions, callback: GeocodeCallback): void {
+    tdtHttpRequest('/v2/search', buildSearchParams(params), callback)
+}
+
+@UTSJS.keepAlive
+export function searchInBounds(params: SearchOptions, callback: GeocodeCallback): void {
+    const p = buildSearchParams(params)
+    tdtHttpRequest('/v2/search', p, callback)
+}
+
+@UTSJS.keepAlive
+export function searchNearby(params: SearchOptions, callback: GeocodeCallback): void {
+    const p = buildSearchParams(params)
+    tdtHttpRequest('/v2/search', p, callback)
+}
+
+// ═══════════════════════════════════════════════════════════
+// v1.3.0: 定位
+// ═══════════════════════════════════════════════════════════
+
+let userLocationMarker: any = null
+let userLocationShown: boolean = false
+
+export function showUserLocation(enabled: boolean): void {
+    if (mapInstance == null) return
+    userLocationShown = enabled
+    if (enabled && userLocationMarker == null) {
+        // 使用浏览器 Geolocation API
+        if (navigator.geolocation != null) {
+            navigator.geolocation.getCurrentPosition(
+                (pos) => {
+                    const mlg = getMapLibre()
+                    if (mlg == null) return
+                    userLocationMarker = new mlg.Marker({ color: '#4285F4' })
+                        .setLngLat([pos.coords.longitude, pos.coords.latitude])
+                        .addTo(mapInstance)
+                },
+                (err) => {
+                    console.error('TDTMap Web: 定位失败', err.message)
+                }
+            )
+        }
+    }
+    if (!enabled && userLocationMarker != null) {
+        userLocationMarker.remove()
+        userLocationMarker = null
+    }
+}
+
+@UTSJS.keepAlive
+export function getUserLocation(
+    callback: (detail: MapClickDetail) => void,
+    onError?: (err: MapErrorDetail) => void
+): void {
+    if (navigator.geolocation == null) {
+        if (onError != null) onError({ code: 4, message: '浏览器不支持定位' })
+        return
+    }
+    navigator.geolocation.getCurrentPosition(
+        (pos) => {
+            callback({ lat: pos.coords.latitude, lng: pos.coords.longitude })
+        },
+        (err) => {
+            if (onError != null) onError({ code: 2, message: '定位失败: ' + err.message })
+        },
+        { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+    )
+}
+
+// ═══════════════════════════════════════════════════════════
+// v1.3.0: 信息窗口
+// ═══════════════════════════════════════════════════════════
+
+export function showMarkerInfo(id: number): void {
+    const marker = markerMap.get(id)
+    if (marker != null) {
+        try { marker.togglePopup() } catch (e) { /* ignore */ }
+    }
+}
+
+export function hideMarkerInfo(id: number): void {
+    const marker = markerMap.get(id)
+    if (marker != null) {
+        try { marker.togglePopup() } catch (e) { /* ignore */ }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════
+// v1.3.0: 自定义瓦片图层
+// ═══════════════════════════════════════════════════════════
+
+function removeCustomTileLayerInternal(layerId: string): void {
+    const entry = customTileLayers.get(layerId)
+    if (entry == null || mapInstance == null) return
+    try {
+        if (mapInstance.getLayer(entry.layerId) != null) mapInstance.removeLayer(entry.layerId)
+    } catch (e) { /* ignore */ }
+    try {
+        if (mapInstance.getSource(entry.sourceId) != null) mapInstance.removeSource(entry.sourceId)
+    } catch (e) { /* ignore */ }
+}
+
+export function addCustomTileLayer(id: string, tileUrl: string): void {
+    if (mapInstance == null) return
+    const sourceId = 'custom-tile-src-' + id
+    const layerId = 'custom-tile-layer-' + id
+
+    try {
+        mapInstance.addSource(sourceId, {
+            type: 'raster',
+            tiles: [tileUrl],
+            tileSize: 256
+        })
+        mapInstance.addLayer({
+            id: layerId,
+            type: 'raster',
+            source: sourceId
+        })
+        customTileLayers.set(id, { sourceId: sourceId, layerId: layerId })
+    } catch (e: any) {
+        console.error('TDTMap Web: addCustomTileLayer 失败', e)
+    }
+}
+
+export function removeCustomTileLayer(id: string): void {
+    removeCustomTileLayerInternal(id)
+    customTileLayers.delete(id)
+}
+
+// ═══════════════════════════════════════════════════════════
+// v1.4.0: 地图交互增强
+// ═══════════════════════════════════════════════════════════
+
+@UTSJS.keepAlive
+export function setMapLongClickCallback(callback: MapLongClickCallback): void {
+    mapLongClickCallback = callback
+}
+
+export function setBearing(bearing: number): void {
+    if (mapInstance != null) {
+        mapInstance.setBearing(bearing)
+    }
+}
+
+export function setTilt(tilt: number): void {
+    if (mapInstance != null) {
+        mapInstance.setPitch(tilt)
+    }
+}
+
+export function getBearing(): number {
+    if (mapInstance == null) return 0
+    return mapInstance.getBearing()
+}
+
+export function getTilt(): number {
+    if (mapInstance == null) return 0
+    return mapInstance.getPitch()
+}
+
+export function enableRotate(enabled: boolean): void {
+    if (mapInstance == null) return
+    if (enabled) {
+        mapInstance.touchZoomRotate.enableRotation()
+    } else {
+        mapInstance.touchZoomRotate.disableRotation()
+    }
+}
+
+export function enableTilt(enabled: boolean): void {
+    if (mapInstance == null) return
+    if (enabled) {
+        mapInstance.setPitch(60)  // 恢复最大倾斜
+        mapInstance.touchPitch.enable()
+    } else {
+        mapInstance.setPitch(0)
+        mapInstance.touchPitch.disable()
+    }
+}
+
+@UTSJS.keepAlive
+export function setCameraChangeCallback(callback: CameraChangeCallback): void {
+    cameraChangeCallback = callback
+}

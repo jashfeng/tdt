@@ -1,0 +1,868 @@
+<template>
+  <view id="tdt-map-wrapper" class="tdt-map-wrapper">
+    <!-- #ifdef APP-ANDROID || APP-IOS || APP-HARMONY -->
+    <native-view
+      class="map-container"
+      @init="onNativeViewInit"
+    />
+    <!-- #endif -->
+    <!-- #ifdef WEB -->
+    <view id="tdt-map-web" ref="webMapContainer" class="map-container" />
+    <!-- #endif -->
+
+    <!-- ═══ v1.5.6: marker 气泡 ═══
+    显示在定位图标正上方，随地图移动/缩放自动跟随（cameraChange 时重算位置）。
+    根因（日志实测）：MapLibre 11.x 的 showInfoWindow 调用无异常但气泡不显示（与 animateCamera
+    动画不推进同源——SDK 内 View 动态更新机制在 native-view 集成下失效），
+    改用 uvue 层自定义气泡 + Web Mercator 数学换算，零原生依赖、热刷生效 -->
+    <view v-if="bubbleVisible" class="tdt-marker-bubble" :style="{ left: bubbleX + 'px', top: bubbleY + 'px' }" @tap="hideBubble">
+      <text class="tdt-marker-bubble-text">{{ bubbleText }}</text>
+      <view class="tdt-marker-bubble-arrow" />
+    </view>
+
+    <!-- ═══ v1.5.0 内置搜索框（覆盖在地图上方，可用 show-search-bar 关闭）═══ -->
+    <view v-if="showSearchBar" class="tdt-search-bar" :style="{ top: (statusBarHeight + 10) + 'px' }">
+      <view class="tdt-search-row">
+        <input
+          class="tdt-search-input"
+          v-model="searchKeyword"
+          placeholder="搜索地点"
+          confirm-type="search"
+          @confirm="doSearch"
+        />
+        <view class="tdt-search-btn" @tap="doSearch">
+          <text class="tdt-search-btn-text">搜索</text>
+        </view>
+      </view>
+    </view>
+    <!-- ═══ v1.5.5: 结果列表独立于搜索栏容器 ═══
+    此前列表是 search-bar（height:70rpx + overflow:visible）的溢出子元素，
+    Android 端溢出区域 hit-test 失效，点击列表项穿透到 native-view（日志实测触发的是“地图点击”） -->
+    <view v-if="searchResults.length > 0" class="tdt-search-results" :style="{ top: searchResultTop + 'px' }">
+      <view
+        v-for="(item, index) in searchResults"
+        :key="index"
+        class="tdt-search-item"
+        @tap="selectSearchResult(index)"
+      >
+        <text class="tdt-search-item-name">{{ item.name }}</text>
+        <text class="tdt-search-item-addr">{{ item.address }}</text>
+      </view>
+    </view>
+
+    <!-- ═══ v1.5.0 内置定位按钮（点击获取当前位置并回中，可用 show-locate-button 关闭）═══ -->
+    <view v-if="showLocateButton" class="tdt-locate-btn" @tap="locateToCurrent">
+      <text class="tdt-locate-icon">◎</text>
+    </view>
+
+    <!-- ═══ v1.6.0 缩放按钮组 ═══
+    Android/iOS 原生 SDK 无内置缩放按钮（context7 已验证），uvue 层补齐，点击调 zoomIn/zoomOut；
+    鸿蒙/Web 端用原生控件（各自原生层实现），此块经条件编译仅存在于 APP-ANDROID/APP-IOS -->
+    <!-- #ifdef APP-ANDROID || APP-IOS -->
+    <view v-if="showZoomControl" class="tdt-zoom-control">
+      <view class="tdt-zoom-btn" @tap="zoomInOne">
+        <text class="tdt-zoom-icon">+</text>
+      </view>
+      <view class="tdt-zoom-divider" />
+      <view class="tdt-zoom-btn" @tap="zoomOutOne">
+        <text class="tdt-zoom-icon">−</text>
+      </view>
+    </view>
+    <!-- #endif -->
+
+    <!-- ═══ v1.6.0 比例尺 ═══
+    OSM Wiki ground resolution 公式计算（天地图 256px 瓦片 Web Mercator 适用）：
+    米/px = 156543.03 × cos(lat) / 2^zoom；取 [1,2,5]×10ⁿ 中 ≤100px 最大档 -->
+    <!-- #ifdef APP-ANDROID || APP-IOS -->
+    <view v-if="showScaleControl" class="tdt-scale-control">
+      <view class="tdt-scale-bar" :style="{ width: scaleBarWidth + 'px' }">
+        <view class="tdt-scale-tick tdt-scale-tick-left" />
+        <view class="tdt-scale-line" />
+        <view class="tdt-scale-tick tdt-scale-tick-right" />
+      </view>
+      <text class="tdt-scale-text">{{ scaleText }}</text>
+    </view>
+    <!-- #endif -->
+
+    <!-- ═══ v1.6.0 版权条 ═══
+    四端统一 uvue 层渲染。天地图服务条款要求在地图显著位置（官方参考左下角）标注"天地图"标识与审图号，
+    未标注将被暂停调用（来源：tianditu.gov.cn/about/copyright） -->
+    <view v-if="showCopyrightControl" class="tdt-copyright">
+      <text class="tdt-copyright-text">{{ copyrightText }}</text>
+    </view>
+  </view>
+</template>
+
+<script setup lang="uts">
+import { ref, computed, onMounted, onUnmounted } from 'vue'
+import {
+  initMap, setCenter, setZoom,
+  addMarker, clearMarkers, switchMapType,
+  onResume, onPause, destroyMap,
+  getCenter, getZoom, fitBounds,
+  addPolygon, clearPolygons, snapshot,
+  zoomIn, zoomOut, setMinZoom, setMaxZoom,
+  panTo, centerAndZoom, enableZoom, enableDrag,
+  setMaxBounds, getBounds, gcj02ToWgs84,
+  addPolyline, addCircle, addRectangle, addLabel, setMarkers, clearOverlays,
+  removeOverlay, showOverlay, hideOverlay,
+  setMarkerClickCallback,
+  checkResize, planBy, setViewport, getSize,
+  getDistance, getViewport, getCode,
+  geocode_getLocation, geocode_getPoint, search, searchInBounds, searchNearby,
+  showUserLocation, getUserLocation, showMarkerInfo, hideMarkerInfo,
+  addCustomTileLayer, removeCustomTileLayer,
+  setMapLongClickCallback, setBearing, setTilt, getBearing, getTilt,
+  enableRotate, enableTilt, setCameraChangeCallback
+} from '@/uni_modules/beige-tdt-map'
+import globalConfig from '@/uni_modules/beige-tdt-map/config'
+import type { MapClickDetail, MapBoundsDetail, MapErrorDetail, MapSizeDetail, MapViewportDetail, MarkerClickCallback, GeocodeCallback, SearchOptions, MapLongClickCallback, CameraChangeCallback } from '@/uni_modules/beige-tdt-map'
+
+const props = defineProps({
+  apiKey: { type: String, default: '' },
+  latitude: { type: Number, default: 39.9042 },
+  longitude: { type: Number, default: 116.4075 },
+  zoom: { type: Number, default: 10 },
+  mapType: { type: String, default: 'vec' },
+  // v1.5.0: 内置搜索框开关（默认开启，设为 false 可隐藏）
+  showSearchBar: { type: Boolean, default: true },
+  // v1.5.0: 内置定位按钮开关（默认开启，设为 false 可隐藏）
+  showLocateButton: { type: Boolean, default: true },
+  // v1.5.1: Android 专用——模拟器/特殊层叠场景启用 TextureView 渲染（MapLibre 官方 issue #3070），
+  // 真机保持 false（GLSurfaceView 硬件加速性能最优）
+  textureMode: { type: Boolean, default: false },
+  // v1.6.0: 缩放按钮显隐（Android/iOS 为 uvue 样式；鸿蒙/Web 为原生样式，仅初始化生效）
+  showZoomControl: { type: Boolean, default: true },
+  // v1.6.0: 比例尺显隐（同上，鸿蒙/Web 仅初始化生效）
+  showScaleControl: { type: Boolean, default: true },
+  // v1.6.0: 版权条显隐（四端统一 uvue 层，天地图合规要求，默认开启；响应式）
+  showCopyrightControl: { type: Boolean, default: true },
+  // v1.6.0: 版权条文本。合规提示：建议填入你的天地图审图号，如"© 天地图 GS(2025)xxx号"
+  // （审图号随 Key 申请获得，插件无法预知，需用户填写）
+  copyrightText: { type: String, default: '© 天地图' }
+})
+
+// v1.5.0: 搜索结果项类型
+// context7 验证：天地图搜索 API 返回 {status, result:{pois:[{name,address,lonlat:"lon,lat"}]}}
+type SearchResultItem = {
+  name: string
+  address: string
+  lon: number
+  lat: number
+}
+
+const emit = defineEmits<{
+  (e: 'mapReady'): void
+  (e: 'mapClick', detail: MapClickDetail): void
+  (e: 'mapError', detail: MapErrorDetail): void
+  (e: 'markertap', detail: MapClickDetail): void
+  (e: 'mapLongClick', detail: MapClickDetail): void
+  (e: 'cameraChange', detail: MapClickDetail): void
+  // v1.5.0: 搜索完成事件，返回结果列表
+  (e: 'searchResult', results: Array<SearchResultItem>): void
+}>()
+
+const isMapReady = ref(false)
+// v1.5.0: 搜索关键词与结果
+const searchKeyword = ref('')
+const searchResults = ref<Array<SearchResultItem>>([])
+// 状态栏高度（搜索框避让系统状态栏，避免刘海屏遮挡）
+const statusBarHeight = ref(20)
+// v1.5.5: 搜索框高度 70rpx 换算为 px，结果列表绝对定位在搜索框正下方
+let screenWidthPx = 375
+const searchResultTop = computed((): number => {
+  return statusBarHeight.value + 10 + Math.round(screenWidthPx * 70 / 750) + 4
+})
+
+// ═══ v1.5.6: marker 气泡（显示在定位图标上方，随地图移动/缩放自动跟随） ═══
+// 根因（日志实测）：MapLibre 11.x 的 showInfoWindow 调用无异常但气泡不显示
+// （与 animateCamera 动画不推进同源——SDK 内 View 动态更新机制在 native-view 集成下失效）。
+// 方案：uvue 层自定义气泡，用 Web Mercator 标准公式（微软 Azure Maps 官方文档 /
+// OSM Slippy Map Tilenames）做经纬度→屏幕坐标换算，零原生依赖、热刷生效。
+type ScreenPoint = { x: number, y: number }
+const bubbleVisible = ref(false)
+const bubbleText = ref('')
+const bubbleX = ref(0)
+const bubbleY = ref(0)
+let bubbleLat = 0
+let bubbleLng = 0
+// 地图容器尺寸（css px，四端统一）：uni.getElementById + getBoundingClientRect 同步获取。
+// 不直接用各端 UTS getSize——Android 返回物理像素、iOS 返回 point、鸿蒙返回 {0,0}、H5 返回 css px，
+// 单位三端不一致；容器自测（uni-app x 官方 API：Web 4.0 / Android 4.0 / iOS 4.11 / HarmonyOS 4.61）四端统一。
+let containerW = 0
+let containerH = 0
+// 气泡尺寸与锚点偏移（css px）：marker 默认图标高约 60dp，气泡底部箭头距图标顶 8px
+const BUBBLE_WIDTH = 300
+const BUBBLE_HEIGHT = 60
+const BUBBLE_ANCHOR = 68
+
+function latLngToScreen(lat: number, lng: number): ScreenPoint {
+  const center = getCurrentCenter()
+  const zoom = getCurrentZoom()
+  // Web Mercator：世界尺寸 = 256 * 2^zoom（tileSize=256 标准）
+  const worldSize = 256 * Math.pow(2, zoom)
+  const latRad = lat * Math.PI / 180
+  const sinLat = Math.sin(latRad)
+  const px = (lng + 180) / 360 * worldSize
+  const py = (0.5 - Math.log((1 + sinLat) / (1 - sinLat)) / (4 * Math.PI)) * worldSize
+  const cLatRad = center.lat * Math.PI / 180
+  const cSinLat = Math.sin(cLatRad)
+  const cpx = (center.lng + 180) / 360 * worldSize
+  const cpy = (0.5 - Math.log((1 + cSinLat) / (1 - cSinLat)) / (4 * Math.PI)) * worldSize
+  // 目标全局像素 - 中心全局像素 + 容器中心 = 容器内 css px 坐标（四端统一）
+  return { x: px - cpx + containerW / 2, y: py - cpy + containerH / 2 }
+}
+
+// 查询 wrapper 容器尺寸（同步）。uni-app x 官方文档：
+// https://doc.dcloud.net.cn/uni-app-x/dom/unielement.html#getBoundingClientRect
+// 兼容性：Web 4.0 / Android 4.0 / iOS 4.11 / HarmonyOS 4.61
+function queryContainerSize(): void {
+  try {
+    const el = uni.getElementById('tdt-map-wrapper')
+    if (el != null) {
+      const rect = el.getBoundingClientRect()
+      if (rect.width > 0 && rect.height > 0) {
+        containerW = rect.width
+        containerH = rect.height
+      }
+    }
+  } catch (e: any) {
+  }
+}
+
+function updateBubblePosition(): void {
+  if (!bubbleVisible.value) return
+  const pt = latLngToScreen(bubbleLat, bubbleLng)
+  // 气泡中心对齐 marker 屏幕点，上移锚点偏移（箭头指向图标顶部）
+  let x = Math.round(pt.x - BUBBLE_WIDTH / 2)
+  let y = Math.round(pt.y - BUBBLE_ANCHOR - BUBBLE_HEIGHT)
+  // 钳制在可视区域内
+  if (x < 4) x = 4
+  if (x > containerW - BUBBLE_WIDTH - 4) x = Math.round(containerW - BUBBLE_WIDTH - 4)
+  if (y < 4) y = 4
+  bubbleX.value = x
+  bubbleY.value = y
+}
+
+function showBubble(text: string, lat: number, lng: number): void {
+  bubbleText.value = text
+  bubbleLat = lat
+  bubbleLng = lng
+  bubbleVisible.value = true
+  if (containerW <= 0 || containerH <= 0) {
+    queryContainerSize()
+  }
+  updateBubblePosition()
+}
+
+function hideBubble(): void {
+  bubbleVisible.value = false
+}
+
+// ═══ v1.6.0: 比例尺计算 ═══
+// OSM Wiki "Zoom levels" 标准 ground resolution（天地图为标准 256px 瓦片 Web Mercator）：
+// 米/px = 156543.03 × cos(lat) / 2^zoom；tilt=0 时精确，tilt≠0 按屏幕中心纬度近似
+// （与高德/百度等主流地图行为一致）
+const scaleText = ref('')
+const scaleBarWidth = ref(100)
+const SCALE_MAX_PX = 100
+
+function formatScaleDistance(meters: number): string {
+  if (meters >= 1000) return (meters / 1000) + 'km'
+  return meters + 'm'
+}
+
+function updateScale(): void {
+  // 比例尺仅 Android/iOS 端 uvue 层渲染（鸿蒙/Web 由原生控件承担，无需计算）
+  // #ifdef APP-ANDROID || APP-IOS
+  const zoom = getCurrentZoom()
+  const center = getCurrentCenter()
+  const latRad = center.lat * Math.PI / 180
+  const metersPerPx = 156543.03 * Math.cos(latRad) / Math.pow(2, zoom)
+  // 从 [1, 2, 5] × 10ⁿ 米系列中取"像素宽 ≤ 100px"的最大值
+  let bestMeters = 1
+  for (let mag = -3; mag <= 6; mag++) {
+    const base = Math.pow(10, mag)
+    const factors = [1, 2, 5]
+    for (let k = 0; k < factors.length; k++) {
+      const meters = factors[k] * base
+      if (meters / metersPerPx <= SCALE_MAX_PX) {
+        bestMeters = meters
+      }
+    }
+  }
+  scaleBarWidth.value = Math.max(20, Math.round(bestMeters / metersPerPx))
+  scaleText.value = formatScaleDistance(bestMeters)
+  // #endif
+}
+// #ifdef WEB
+const webMapContainer = ref<any>(null)
+// #endif
+
+// Key 优先级：组件 props > config.uts webApiKey（仅 Web 端）> config.uts apiKey
+const effectiveApiKey = computed((): string => {
+  if (props.apiKey != null && props.apiKey.length > 0) return props.apiKey
+  // #ifdef WEB
+  if (globalConfig.webApiKey != null && globalConfig.webApiKey.length > 0) return globalConfig.webApiKey
+  // #endif
+  return globalConfig.apiKey
+})
+
+// @init 是获取 UniNativeViewElement 的唯一时机（页面 mounted 后再取容器会为空）
+function onNativeViewInit(e: UniNativeViewInitEvent): void {
+  console.log('TDTMap: [DIAG] native-view @init 触发，开始 initMap')
+  if (effectiveApiKey.value.length == 0) {
+    console.error('TDTMap: 未配置 API Key。请在 config.uts 中填写或在组件上设置 api-key')
+    emit('mapError', { code: 1, message: '未配置 API Key' })
+    return
+  }
+
+  initMap(
+    e.detail.element,
+    {
+      apiKey: effectiveApiKey.value,
+      latitude: props.latitude,
+      longitude: props.longitude,
+      zoom: props.zoom,
+      mapType: props.mapType,
+      textureMode: props.textureMode,
+      // v1.6.0: 控件开关透传（鸿蒙/Web 原生层初始化读取；Android/iOS 忽略）
+      showZoomControl: props.showZoomControl,
+      showScaleControl: props.showScaleControl
+    },
+    (detail: MapClickDetail) => {
+      emit('mapClick', detail)
+    },
+    () => {
+      isMapReady.value = true
+      // v1.6.0: 初始化完成后计算比例尺
+      updateScale()
+      emit('mapReady')
+    },
+    (error: MapErrorDetail) => {
+      emit('mapError', error)
+    }
+  )
+
+  // 注册标记点击回调
+  setMarkerClickCallback((detail: MapClickDetail) => {
+    emit('markertap', detail)
+  })
+
+  // v1.4.0: 注册长按回调
+  setMapLongClickCallback((detail: MapClickDetail) => {
+    emit('mapLongClick', detail)
+  })
+
+  // v1.4.0: 注册相机变化回调
+  setCameraChangeCallback((detail: MapClickDetail) => {
+    updateBubblePosition()
+    // v1.6.0: 相机变化后重算比例尺
+    updateScale()
+    emit('cameraChange', detail)
+  })
+}
+
+function moveToCenter(lat: number, lng: number): void { setCenter(lat, lng) }
+function zoomTo(level: number): void { setZoom(level) }
+function placeMarker(lat: number, lng: number, title: string, snippet?: string): number { return addMarker(lat, lng, title, snippet) }
+function clearAllMarkers(): void { clearMarkers() }
+function changeMapType(mapType: string): void { switchMapType(mapType) }
+function getCurrentCenter(): MapClickDetail { return getCenter() }
+function getCurrentZoom(): number { return getZoom() }
+function fitToBounds(minLat: number, minLng: number, maxLat: number, maxLng: number, padding: number): void { fitBounds(minLat, minLng, maxLat, maxLng, padding) }
+// 对外接受 {latitude, longitude} 数组，内部映射为接口契约的 MapClickDetail
+type LatLng = { latitude: number, longitude: number }
+function drawPolygon(points: Array<LatLng>, color: string, fillColor: string): number {
+  const detail: Array<MapClickDetail> = []
+  for (let i = 0; i < points.length; i++) {
+    detail.push({ lat: points[i].latitude, lng: points[i].longitude })
+  }
+  return addPolygon(detail, color, fillColor)
+}
+function clearAllPolygons(): void { clearPolygons() }
+function takeSnapshot(): ArrayBuffer { return snapshot() }
+function zoomInOne(): void { zoomIn() }
+function zoomOutOne(): void { zoomOut() }
+function setMinZoomLevel(zoom: number): void { setMinZoom(zoom) }
+function setMaxZoomLevel(zoom: number): void { setMaxZoom(zoom) }
+function panToLocation(lat: number, lng: number, zoom?: number): void {
+  // v1.5.5: 日志实测 MapLibre animateCamera 动画在 UTS 集成下不推进（500ms 零进展，目标 zoom 中间值从未出现），
+  // 而手势改相机正常（zoom 12→10.65 实时生效）——moveCamera 与手势同管线，改用瞬移路径
+  if (zoom != null) {
+    const z = zoom
+    centerAtZoom(lat, lng, z)
+  } else {
+    setCenter(lat, lng)
+  }
+}
+function centerAtZoom(lat: number, lng: number, zoom: number): void { centerAndZoom(lat, lng, zoom) }
+function setZoomEnabled(enabled: boolean): void { enableZoom(enabled) }
+function setDragEnabled(enabled: boolean): void { enableDrag(enabled) }
+function setMapMaxBounds(minLat: number, minLng: number, maxLat: number, maxLng: number): void { setMaxBounds(minLat, minLng, maxLat, maxLng) }
+function getCurrentBounds(): MapBoundsDetail { return getBounds() }
+function convertGcj02ToWgs84(lat: number, lng: number): MapClickDetail { return gcj02ToWgs84(lat, lng) }
+function drawPolyline(points: Array<LatLng>, color: string, width: number): number {
+  const detail: Array<MapClickDetail> = []
+  for (let i = 0; i < points.length; i++) {
+    detail.push({ lat: points[i].latitude, lng: points[i].longitude })
+  }
+  return addPolyline(detail, color, width)
+}
+function drawCircle(lat: number, lng: number, radius: number, color: string, fillColor: string): number { return addCircle(lat, lng, radius, color, fillColor) }
+function drawRectangle(minLat: number, minLng: number, maxLat: number, maxLng: number, color: string, fillColor: string): number { return addRectangle(minLat, minLng, maxLat, maxLng, color, fillColor) }
+function drawLabel(lat: number, lng: number, text: string): number { return addLabel(lat, lng, text) }
+function batchMarkers(markers: Array<LatLng>): Array<number> {
+  const detail: Array<MapClickDetail> = []
+  for (let i = 0; i < markers.length; i++) {
+    detail.push({ lat: markers[i].latitude, lng: markers[i].longitude })
+  }
+  return setMarkers(detail)
+}
+function clearAllOverlays(): void { clearOverlays() }
+
+// ── 新增：覆盖物单个操作 ──
+function removeOverlayById(id: number): void { removeOverlay(id) }
+function showOverlayById(id: number): void { showOverlay(id) }
+function hideOverlayById(id: number): void { hideOverlay(id) }
+
+// ── 新增：地图工具 ──
+function doCheckResize(): void { checkResize() }
+function doPlanBy(x: number, y: number): void { planBy(x, y) }
+function setViewportPoints(points: Array<LatLng>): void {
+  const detail: Array<MapClickDetail> = []
+  for (let i = 0; i < points.length; i++) {
+    detail.push({ lat: points[i].latitude, lng: points[i].longitude })
+  }
+  setViewport(detail)
+}
+function getMapSize(): MapSizeDetail { return getSize() }
+
+// ── 新增：信息计算 ──
+function calculateDistance(start: MapClickDetail, end: MapClickDetail): number { return getDistance(start, end) }
+function calculateViewport(points: Array<MapClickDetail>): MapViewportDetail { return getViewport(points) }
+function getMapCode(): string { return getCode() }
+
+// ── 新增：天地图 Web API ──
+function reverseGeocode(latlng: MapClickDetail, callback: GeocodeCallback): void { geocode_getLocation(latlng, callback) }
+function forwardGeocode(address: string, callback: GeocodeCallback): void { geocode_getPoint(address, callback) }
+function keywordSearch(params: SearchOptions, callback: GeocodeCallback): void { search(params, callback) }
+function boundsSearch(params: SearchOptions, callback: GeocodeCallback): void { searchInBounds(params, callback) }
+function nearbySearch(params: SearchOptions, callback: GeocodeCallback): void { searchNearby(params, callback) }
+
+// ── v1.3.0 新增：定位 ──
+function setShowUserLocation(enabled: boolean): void { showUserLocation(enabled) }
+function getCurrentLocation(callback: (detail: MapClickDetail) => void, onError?: (err: MapErrorDetail) => void): void { getUserLocation(callback, onError) }
+
+// ═══ v1.5.0 新增：内置搜索 ═══
+// context7 验证：UTSJSONObject.getJSON("result") 取嵌套对象、getArray<UTSJSONObject>("pois") 取数组（官方文档 buildin-object-api）
+function doSearch(): void {
+  const kw = searchKeyword.value
+  console.log('TDTMap: [DIAG] 搜索按钮触发 keyWord=' + kw)
+  if (kw.length == 0) {
+    console.log('TDTMap: [DIAG] 搜索词为空，直接返回')
+    return
+  }
+  keywordSearch({ keyWord: kw, count: '10' }, (data: UTSJSONObject) => {
+    console.log('TDTMap: [DIAG] 搜索回调返回')
+    const raw = JSON.stringify(data)
+    console.log('TDTMap: [DIAG] 响应内容=' + raw)
+    // 跨运行时回传的对象方法集不完整（实测 getAny is not a function，getJSON/getArray 同样不可靠），
+    // 官方 JSON 文档（buildin-object-api/json.html）：JSON.parse 本地重建后使用 [] 下标访问，是全平台通用方式
+    const obj = JSON.parse(raw) as UTSJSONObject
+    const statusObj = obj["status"] as UTSJSONObject
+    let infocode = -1
+    if (statusObj != null) {
+      const ic = statusObj["infocode"]
+      infocode = ic != null ? (ic as number) : -1
+      console.log('TDTMap: [DIAG] infocode=' + infocode)
+    }
+    if (infocode != 1000) {
+      console.error('TDTMap: 搜索失败 infocode=' + infocode)
+      searchResults.value = []
+      return
+    }
+    const items: Array<SearchResultItem> = []
+    const pois = obj["pois"] as UTSJSONObject[]
+    console.log('TDTMap: [DIAG] pois数量=' + (pois?.length ?? -1))
+    if (pois != null) {
+      for (let i = 0; i < pois.length; i++) {
+        const poi = pois[i]
+        console.log('TDTMap: [DIAG] poi[' + i + ']=' + JSON.stringify(poi))
+        const nm = poi["name"]
+        const name = nm != null ? (nm as string) : ''
+        const ad = poi["address"]
+        const address = ad != null ? (ad as string) : ''
+        const ll = poi["lonlat"]
+        const lonlat = ll != null ? (ll as string) : ''
+        const parts = lonlat.split(',')
+        if (parts.length >= 2) {
+          items.push({ name: name, address: address, lon: parseFloat(parts[0]), lat: parseFloat(parts[1]) })
+        }
+      }
+    }
+    console.log('TDTMap: [DIAG] 解析出条目数=' + items.length)
+    searchResults.value = items
+    emit('searchResult', items)
+  })
+}
+
+function selectSearchResult(index: number): void {
+  console.log('TDTMap: [DIAG] 列表项点击 index=' + index)
+  const item = searchResults.value[index]
+  if (item == null) return
+  console.log('TDTMap: [DIAG] 选中条目 name=' + item.name + ' lat=' + item.lat + ' lon=' + item.lon)
+  // v1.5.5: 观测相机操作前后状态，定位“animateCamera 调用但相机不动”的断点
+  const before = getCurrentCenter()
+  console.log('TDTMap: [DIAG] panTo 前相机 lat=' + before.lat + ' lng=' + before.lng + ' zoom=' + getCurrentZoom())
+  searchResults.value = []
+  searchKeyword.value = item.name
+  panToLocation(item.lat, item.lon, 16)
+  const after = getCurrentCenter()
+  console.log('TDTMap: [DIAG] panTo 后立即相机 lat=' + after.lat + ' lng=' + after.lng + ' zoom=' + getCurrentZoom())
+  console.log('TDTMap: [DIAG] panToLocation 已调用')
+  placeMarker(item.lat, item.lon, item.name)
+  console.log('TDTMap: [DIAG] placeMarker 已调用')
+  // 动画默认 300ms，500ms 后读终态：若仍是北京坐标则动画从未启动
+  setTimeout(() => {
+    const late = getCurrentCenter()
+    console.log('TDTMap: [DIAG] 500ms后相机 lat=' + late.lat + ' lng=' + late.lng + ' zoom=' + getCurrentZoom())
+  }, 500)
+}
+
+// ═══ v1.5.0 新增：内置定位按钮 ═══
+// v1.5.3: uni-app x 无 uni.authorize API（仅存在于 uni-app Vue2/Vue3），
+// 直接调用 getLocation，系统首次调用自动弹出定位授权框
+function locateToCurrent(): void {
+  doLocate()
+}
+
+function doLocate(): void {
+  // v1.5.4: 点击即时反馈 + 失败提示（修复“点击定位按钮无反应”——此前失败仅 console.error，用户无感知）
+  try { uni.showToast({ title: '定位中...', icon: 'loading' }) } catch (e: any) { }
+  getCurrentLocation((detail: MapClickDetail) => {
+    try { uni.hideToast() } catch (e2: any) { }
+    panToLocation(detail.lat, detail.lng, 16)
+    setShowUserLocation(true)
+  }, (err: MapErrorDetail) => {
+    console.error('TDTMap: 获取定位失败: ' + err.message)
+    try { uni.showToast({ title: '定位失败: ' + err.message, icon: 'none', duration: 2500 }) } catch (e3: any) { }
+  })
+}
+
+// ── v1.3.0 新增：信息窗口 ──
+function showMarkerInfoById(id: number): void { showMarkerInfo(id) }
+function hideMarkerInfoById(id: number): void { hideMarkerInfo(id) }
+
+// ── v1.3.0 新增：自定义瓦片图层 ──
+function addTileLayer(id: string, tileUrl: string): void { addCustomTileLayer(id, tileUrl) }
+function removeTileLayer(id: string): void { removeCustomTileLayer(id) }
+
+// ── v1.4.0 新增：地图交互增强 ──
+function setMapBearing(bearing: number): void { setBearing(bearing) }
+function setMapTilt(tilt: number): void { setTilt(tilt) }
+function getMapBearing(): number { return getBearing() }
+function getMapTilt(): number { return getTilt() }
+function setRotateEnabled(enabled: boolean): void { enableRotate(enabled) }
+function setTiltEnabled(enabled: boolean): void { enableTilt(enabled) }
+
+// #ifdef WEB
+// Web 平台：在 mounted 中初始化地图（使用 view 容器替代 native-view）
+onMounted(() => {
+  if (effectiveApiKey.value.length == 0) {
+    console.error('TDTMap: 未配置 API Key。请在 config.uts 中填写或在组件上设置 api-key')
+    emit('mapError', { code: 1, message: '未配置 API Key' })
+    return
+  }
+
+  // 使用 id 字符串传递给 MapLibre GL JS，由它内部用 document.getElementById 获取 DOM 元素
+  initMap(
+    "tdt-map-web",
+    {
+      apiKey: effectiveApiKey.value,
+      latitude: props.latitude,
+      longitude: props.longitude,
+      zoom: props.zoom,
+      mapType: props.mapType,
+      // v1.6.0: 控件开关透传（Web 原生层初始化读取）
+      showZoomControl: props.showZoomControl,
+      showScaleControl: props.showScaleControl
+    },
+    (detail: MapClickDetail) => {
+      emit('mapClick', detail)
+    },
+    () => {
+      isMapReady.value = true
+      // v1.6.0: 初始化完成后计算比例尺
+      updateScale()
+      emit('mapReady')
+    },
+    (error: MapErrorDetail) => {
+      emit('mapError', error)
+    }
+  )
+
+  setMarkerClickCallback((detail: MapClickDetail) => {
+    emit('markertap', detail)
+  })
+
+  setMapLongClickCallback((detail: MapClickDetail) => {
+    emit('mapLongClick', detail)
+  })
+
+  setCameraChangeCallback((detail: MapClickDetail) => {
+    updateBubblePosition()
+    // v1.6.0: 相机变化后重算比例尺
+    updateScale()
+    emit('cameraChange', detail)
+  })
+})
+// #endif
+
+// 生命周期成对：挂载恢复、卸载先暂停再销毁，防止内存泄漏与多实例叠加
+onMounted(() => {
+  // 获取状态栏高度，搜索框避让刘海屏/状态栏
+  try {
+    const sysInfo = uni.getSystemInfoSync()
+    if (sysInfo != null && sysInfo.statusBarHeight != null && sysInfo.statusBarHeight > 0) {
+      statusBarHeight.value = sysInfo.statusBarHeight
+    }
+    if (sysInfo != null && sysInfo.windowWidth != null && sysInfo.windowWidth > 0) {
+      screenWidthPx = sysInfo.windowWidth
+    }
+  } catch (e: any) {
+  }
+  // v1.5.6: 容器尺寸自测（气泡坐标换算基准，四端统一 css px）
+  queryContainerSize()
+  onResume()
+})
+onUnmounted(() => {
+  onPause()
+  destroyMap()
+})
+
+defineExpose({
+  moveToCenter, zoomTo, placeMarker, clearAllMarkers, changeMapType,
+  getCurrentCenter, getCurrentZoom, fitToBounds, drawPolygon, clearAllPolygons, takeSnapshot,
+  zoomInOne, zoomOutOne, setMinZoomLevel, setMaxZoomLevel,
+  panToLocation, centerAtZoom, setZoomEnabled, setDragEnabled,
+  setMapMaxBounds, getCurrentBounds, convertGcj02ToWgs84,
+  drawPolyline, drawCircle, drawRectangle, drawLabel, batchMarkers, clearAllOverlays,
+  removeOverlayById, showOverlayById, hideOverlayById,
+  doCheckResize, doPlanBy, setViewportPoints, getMapSize,
+  calculateDistance, calculateViewport, getMapCode,
+  reverseGeocode, forwardGeocode, keywordSearch, boundsSearch, nearbySearch,
+  setShowUserLocation, getCurrentLocation, showMarkerInfoById, hideMarkerInfoById,
+  addTileLayer, removeTileLayer,
+  setMapBearing, setMapTilt, getMapBearing, getMapTilt, setRotateEnabled, setTiltEnabled,
+  isMapReady,
+  doSearch, selectSearchResult, locateToCurrent,
+  showBubble, hideBubble
+})
+</script>
+
+<style>
+.tdt-map-wrapper { flex: 1; width: 100%; }
+.map-container { flex: 1; width: 100%; }
+
+/* ═══ v1.5.0 内置搜索框 ═══ */
+.tdt-search-bar {
+  position: absolute;
+  left: 20rpx;
+  right: 20rpx;
+  z-index: 100;
+  /* v1.5.2: 显式高度（输入行高度），防止 absolute 容器被拉伸撑满后覆盖整幅地图拦截手势；
+  搜索结果列表通过 overflow: visible 溢出显示（官方文档：uni-app x 仅 view 组件支持 visible） */
+  height: 70rpx;
+  overflow: visible;
+}
+.tdt-search-row {
+  flex-direction: row;
+  align-items: center;
+  background-color: #ffffff;
+  border-radius: 35rpx;
+  box-shadow: 0 2rpx 10rpx rgba(0, 0, 0, 0.15);
+}
+.tdt-search-input {
+  flex: 1;
+  height: 70rpx;
+  padding-left: 30rpx;
+  padding-right: 20rpx;
+  font-size: 28rpx;
+}
+.tdt-search-btn {
+  width: 110rpx;
+  height: 70rpx;
+  justify-content: center;
+  align-items: center;
+}
+.tdt-search-btn-text {
+  font-size: 28rpx;
+  color: #007aff;
+  font-weight: bold;
+}
+.tdt-search-results {
+  position: absolute;
+  left: 20rpx;
+  right: 20rpx;
+  z-index: 100;
+  background-color: #ffffff;
+  border-radius: 12rpx;
+  box-shadow: 0 2rpx 10rpx rgba(0, 0, 0, 0.15);
+}
+.tdt-search-item {
+  padding: 20rpx 30rpx;
+  border-bottom-width: 1rpx;
+  border-bottom-style: solid;
+  border-bottom-color: #f0f0f0;
+}
+.tdt-search-item-name {
+  font-size: 28rpx;
+  color: #333333;
+}
+.tdt-search-item-addr {
+  font-size: 22rpx;
+  color: #999999;
+  margin-top: 6rpx;
+}
+
+/* ═══ v1.5.0 内置定位按钮 ═══ */
+.tdt-locate-btn {
+  position: absolute;
+  right: 20rpx;
+  /* #ifdef WEB || APP-HARMONY */
+  /* v1.6.0: Web 原生 NavigationControl+ScaleControl 右下堆叠、鸿蒙原生缩放按钮默认右下，
+  避让上移（初值 200rpx，实测校准） */
+  bottom: 200rpx;
+  /* #endif */
+  /* #ifdef APP-ANDROID || APP-IOS */
+  bottom: 180rpx;
+  /* #endif */
+  width: 84rpx;
+  height: 84rpx;
+  border-radius: 42rpx;
+  background-color: #ffffff;
+  justify-content: center;
+  align-items: center;
+  box-shadow: 0 2rpx 10rpx rgba(0, 0, 0, 0.2);
+  z-index: 100;
+}
+.tdt-locate-icon {
+  font-size: 44rpx;
+  color: #007aff;
+}
+
+/* ═══ v1.5.6 marker 气泡（定位图标上方，随地图跟随） ═══ */
+.tdt-marker-bubble {
+  position: absolute;
+  width: 300px;
+  height: 60px;
+  background-color: #ffffff;
+  border-radius: 10px;
+  box-shadow: 0 2rpx 12rpx rgba(0, 0, 0, 0.25);
+  padding: 8px 12px;
+  justify-content: center;
+  z-index: 95;
+}
+.tdt-marker-bubble-text {
+  font-size: 24rpx;
+  color: #333333;
+  lines: 2;
+  text-overflow: ellipsis;
+  text-align: center;
+}
+.tdt-marker-bubble-arrow {
+  position: absolute;
+  bottom: -8px;
+  left: 142px;
+  width: 16px;
+  height: 16px;
+  background-color: #ffffff;
+  transform: rotate(45deg);
+}
+
+/* ═══ v1.6.0 缩放按钮组（z-index 93：低于现有控件 95~100，高于版权条/比例尺） ═══ */
+.tdt-zoom-control {
+  position: absolute;
+  right: 20rpx;
+  bottom: 45%;
+  width: 84rpx;
+  background-color: #ffffff;
+  border-radius: 42rpx;
+  box-shadow: 0 2rpx 10rpx rgba(0, 0, 0, 0.2);
+  z-index: 93;
+  flex-direction: column;
+  overflow: hidden;
+}
+.tdt-zoom-btn {
+  width: 84rpx;
+  height: 84rpx;
+  justify-content: center;
+  align-items: center;
+}
+.tdt-zoom-divider {
+  height: 1rpx;
+  background-color: #e5e5e5;
+  margin-left: 16rpx;
+  margin-right: 16rpx;
+}
+.tdt-zoom-icon {
+  font-size: 48rpx;
+  color: #333333;
+  font-weight: bold;
+}
+
+/* ═══ v1.6.0 比例尺（z-index 91，左下角版权条之上 bottom≈26px） ═══ */
+.tdt-scale-control {
+  position: absolute;
+  left: 20rpx;
+  bottom: 52rpx;
+  z-index: 91;
+  flex-direction: column;
+  align-items: flex-start;
+  background-color: rgba(255, 255, 255, 0.7);
+  border-radius: 6rpx;
+  padding: 6rpx 10rpx;
+}
+.tdt-scale-bar {
+  height: 16rpx;
+  position: relative;
+}
+.tdt-scale-tick {
+  position: absolute;
+  bottom: 0;
+  width: 2rpx;
+  height: 16rpx;
+  background-color: #333333;
+}
+.tdt-scale-tick-left { left: 0; }
+.tdt-scale-tick-right { right: 0; }
+.tdt-scale-line {
+  position: absolute;
+  bottom: 7rpx;
+  left: 0;
+  right: 0;
+  height: 2rpx;
+  background-color: #333333;
+}
+.tdt-scale-text {
+  font-size: 20rpx;
+  color: #333333;
+  margin-top: 2rpx;
+}
+
+/* ═══ v1.6.0 版权条（z-index 90 最低，不得遮挡气泡） ═══ */
+.tdt-copyright {
+  position: absolute;
+  left: 8rpx;
+  bottom: 8rpx;
+  z-index: 90;
+  background-color: rgba(255, 255, 255, 0.7);
+  border-radius: 6rpx;
+  padding: 4rpx 10rpx;
+}
+.tdt-copyright-text {
+  font-size: 20rpx;
+  color: #333333;
+}
+</style>

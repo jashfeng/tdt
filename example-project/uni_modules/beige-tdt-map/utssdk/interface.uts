@@ -1,0 +1,172 @@
+export type TDMapOptions = {
+    apiKey: string
+    latitude: number
+    longitude: number
+    zoom: number
+    mapType: string   // 'vec' | 'img' | 'ter'  矢量/影像/地形
+    // v1.5.1: Android 专用可选字段。MapLibre 官方 issue #3070：SurfaceView 在模拟器/特殊层叠场景受限时，
+    // 启用 textureMode(true) 改用 TextureView 渲染（走 Android 标准 View 绘制管线，模拟器软件渲染下更流畅）。
+    // 真机保持默认 false（GLSurfaceView 硬件加速性能最优）；iOS/鸿蒙/H5 忽略此字段。
+    textureMode?: boolean
+    // v1.6.0: 控件显隐（仅鸿蒙/Web 原生层初始化时读取；Android/iOS 忽略，由 uvue 层响应式控制）
+    showZoomControl?: boolean
+    showScaleControl?: boolean
+}
+
+export type MapClickDetail = {
+    lat: number
+    lng: number
+}
+
+export type MapErrorDetail = {
+    code: number       // 错误码：1=Key无效, 2=网络错误, 3=瓦片加载失败, 4=未知错误
+    message: string
+}
+
+export type MapBoundsDetail = {
+    minLat: number
+    minLng: number
+    maxLat: number
+    maxLng: number
+}
+
+export type MapSizeDetail = {
+    width: number
+    height: number
+}
+
+export type MapViewportDetail = {
+    center: MapClickDetail
+    zoom: number
+}
+
+export type MapClickCallback = (detail: MapClickDetail) => void
+export type MapReadyCallback = () => void
+export type MapErrorCallback = (detail: MapErrorDetail) => void
+export type MarkerClickCallback = (detail: MapClickDetail) => void
+export type GeocodeCallback = (data: UTSJSONObject) => void
+// ═══ v1.4.0 新增：地图交互增强 ═══
+export type MapLongClickCallback = (detail: MapClickDetail) => void
+export type CameraChangeCallback = (detail: MapClickDetail) => void
+
+export type SearchOptions = {
+    keyWord: string
+    mapBound?: string
+    level?: string
+    queryType?: string
+    queryRadius?: string
+    pointLonlat?: string
+    start?: string
+    count?: string
+    specifyAdminCode?: string
+}
+
+// 模块级函数
+// 注意：initMap 接收 UniNativeViewElement 是 UTS 模块级插件（非组件插件）的标准模式。
+// 组件通过 <native-view @init="onNativeViewInit"> 获取 UniNativeViewElement，
+// 再传递给各平台实现的 initMap 函数：
+// - Android 调用 bindAndroidView 绑定原生 View
+// - iOS 调用 bindIOSView 绑定原生 UIView
+// - 鸿蒙调用 bindHarmonyWrappedBuilder 绑定 MapComponent 声明式组件
+export declare function initMap(
+    container: UniNativeViewElement,
+    options: TDMapOptions,
+    onClick: MapClickCallback,
+    onReady: MapReadyCallback,
+    onError: MapErrorCallback
+): void
+export declare function setCenter(lat: number, lng: number): void
+export declare function setZoom(zoom: number): void
+export declare function getCenter(): MapClickDetail
+export declare function getZoom(): number
+export declare function fitBounds(minLat: number, minLng: number, maxLat: number, maxLng: number, padding: number): void
+// 覆盖物添加：返回 overlay ID（number），用于后续 removeOverlay/showOverlay/hideOverlay
+// snippet 为信息窗口副标题（可选），设置后标记点击时弹出平台原生气泡
+export declare function addMarker(lat: number, lng: number, title: string, snippet?: string): number
+export declare function clearMarkers(): void
+export declare function addPolygon(points: Array<MapClickDetail>, color: string, fillColor: string): number
+export declare function clearPolygons(): void
+export declare function switchMapType(mapType: string): void
+export declare function snapshot(): ArrayBuffer  // 返回地图截图 PNG 数据
+export declare function onResume(): void
+export declare function onPause(): void
+export declare function destroyMap(): void
+// 缩放控制
+export declare function zoomIn(): void
+export declare function zoomOut(): void
+export declare function setMinZoom(zoom: number): void
+export declare function setMaxZoom(zoom: number): void
+// 视野移动
+export declare function panTo(lat: number, lng: number, zoom?: number): void
+export declare function centerAndZoom(lat: number, lng: number, zoom: number): void
+// 手势控制
+export declare function enableZoom(enabled: boolean): void
+export declare function enableDrag(enabled: boolean): void
+// 范围限制
+export declare function setMaxBounds(minLat: number, minLng: number, maxLat: number, maxLng: number): void
+// 信息获取
+export declare function getBounds(): MapBoundsDetail
+// 坐标转换：GCJ02 → WGS84（高德/腾讯坐标 → 天地图可用坐标，中国境外坐标直接返回原值）
+export declare function gcj02ToWgs84(lat: number, lng: number): MapClickDetail
+// 覆盖物
+export declare function addPolyline(points: Array<MapClickDetail>, color: string, width: number): number
+export declare function addCircle(lat: number, lng: number, radius: number, color: string, fillColor: string): number
+export declare function addRectangle(minLat: number, minLng: number, maxLat: number, maxLng: number, color: string, fillColor: string): number
+export declare function addLabel(lat: number, lng: number, text: string): number
+export declare function setMarkers(markers: Array<MapClickDetail>): Array<number>
+// 覆盖物管理
+export declare function removeOverlay(id: number): void
+export declare function showOverlay(id: number): void
+export declare function hideOverlay(id: number): void
+export declare function clearOverlays(): void
+// 标记点击事件
+export declare function setMarkerClickCallback(callback: MarkerClickCallback): void
+// 地图工具
+export declare function checkResize(): void
+export declare function planBy(x: number, y: number): void
+export declare function setViewport(points: Array<MapClickDetail>): void
+export declare function getSize(): MapSizeDetail
+export declare function getDistance(start: MapClickDetail, end: MapClickDetail): number
+export declare function getViewport(points: Array<MapClickDetail>): MapViewportDetail
+export declare function getCode(): string
+// 天地图 Web API（搜索/地理编码）
+export declare function geocode_getLocation(lnglat: MapClickDetail, callback: GeocodeCallback): void
+export declare function geocode_getPoint(address: string, callback: GeocodeCallback): void
+export declare function search(params: SearchOptions, callback: GeocodeCallback): void
+export declare function searchInBounds(params: SearchOptions, callback: GeocodeCallback): void
+export declare function searchNearby(params: SearchOptions, callback: GeocodeCallback): void
+
+// ═══ v1.3.0 新增：定位 ═══
+// 显示/隐藏用户位置蓝点（Android 需 LocationComponent 权限，iOS 需 NSLocationWhenInUseUsageDescription，鸿蒙使用 ohos.permission.LOCATION）
+export declare function showUserLocation(enabled: boolean): void
+// 获取当前 GPS 位置，异步回调返回经纬度。失败时调用 onError
+export declare function getUserLocation(callback: (detail: MapClickDetail) => void, onError?: (err: MapErrorDetail) => void): void
+
+// ═══ v1.3.0 新增：信息窗口 ═══
+// 显示/隐藏指定标记的信息窗口（需标记创建时设置了 snippet）
+export declare function showMarkerInfo(id: number): void
+export declare function hideMarkerInfo(id: number): void
+
+// ═══ v1.3.0 新增：自定义瓦片图层 ═══
+// 添加自定义 XYZ 瓦片图层（如天气、交通、专题图），tileUrl 需包含 {x}{y}{z} 占位符
+export declare function addCustomTileLayer(id: string, tileUrl: string): void
+// 移除指定 ID 的自定义瓦片图层
+export declare function removeCustomTileLayer(id: string): void
+
+// ═══ v1.4.0 新增：地图交互增强 ═══
+// 地图长按事件：用户长按地图时触发，返回经纬度坐标
+export declare function setMapLongClickCallback(callback: MapLongClickCallback): void
+// 地图旋转：设置 bearing（0=正北，顺时针增加，范围 0~360）
+export declare function setBearing(bearing: number): void
+// 地图倾斜：设置 tilt/pitch（0=垂直俯瞰，范围 0~60，值越大越倾斜）
+export declare function setTilt(tilt: number): void
+// 获取当前旋转角度
+export declare function getBearing(): number
+// 获取当前倾斜角度
+export declare function getTilt(): number
+// 旋转手势开关：控制双指旋转地图手势
+export declare function enableRotate(enabled: boolean): void
+// 倾斜手势开关：控制双指倾斜地图手势（鸿蒙端不支持时通过 onError 上报）
+export declare function enableTilt(enabled: boolean): void
+// 相机移动事件：地图视野变化完成时触发，返回当前中心点坐标
+export declare function setCameraChangeCallback(callback: CameraChangeCallback): void

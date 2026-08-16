@@ -1,0 +1,10 @@
+{
+    "abis": ["arm64-v8a"],
+    "dependencies": [
+        {
+            "id": "maplibre-android-sdk",
+            "source": "implementation 'org.maplibre.gl:android-sdk:11.8.1'"
+        }
+    ],
+    "minSdkVersion": 21
+}

@@ -1,0 +1,18 @@
+{
+  "name": "天地图 UTS 插件示例",
+  "appid": "__UNI__TDTMAP2",
+  "versionName": "1.5.0",
+  "versionCode": "105",
+  "description": "天地图 UTS 原生插件（beige-tdt-map）使用示例工程，演示全部 API 功能（四端：Android/iOS/鸿蒙/Web）",
+  "uni-app-x": {
+    "app-android": {
+      "minSdkVersion": 23
+    },
+    "app-ios": {
+      "deploymentTarget": "14.0"
+    },
+    "app-harmony": {
+      "minAPIVersion": 20
+    }
+  }
+}

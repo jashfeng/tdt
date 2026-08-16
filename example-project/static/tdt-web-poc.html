@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>天地图 + MapLibre GL JS 验证</title>
+<script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet" />
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: sans-serif; }
+  #map { width: 100vw; height: 100vh; }
+  .toolbar {
+    position: absolute; top: 10px; left: 10px; z-index: 10;
+    display: flex; gap: 6px; flex-wrap: wrap;
+  }
+  .toolbar button {
+    padding: 6px 12px; border: none; border-radius: 4px;
+    background: #4A90D9; color: #fff; font-size: 13px; cursor: pointer;
+  }
+  .toolbar button.active { background: #E74C3C; }
+  .toolbar input {
+    padding: 6px 8px; border: 1px solid #ccc; border-radius: 4px; width: 280px;
+    font-size: 12px;
+  }
+  .info { position: absolute; bottom: 20px; left: 10px; z-index: 10;
+    padding: 8px 14px; background: rgba(0,0,0,0.7); color: #fff;
+    font-size: 12px; border-radius: 4px; max-width: 90vw; }
+</style>
+</head>
+<body>
+
+<div class="toolbar">
+  <input id="keyInput" type="text" placeholder="输入天地图 Key（浏览器端类型）" />
+  <button onclick="initMap()">加载地图</button>
+  <button onclick="switchLayer('vec')">矢量</button>
+  <button onclick="switchLayer('img')">影像</button>
+  <button onclick="switchLayer('ter')">地形</button>
+  <button onclick="addMarkerDemo()">添加标记</button>
+  <button onclick="clearMarkers()">清除标记</button>
+</div>
+<div id="map"></div>
+<div class="info" id="info">请先输入天地图 Key 并点击「加载地图」</div>
+
+<script>
+let map = null;
+let currentType = 'vec';
+let markers = [];
+
+const LAYERS = {
+  vec:  { map: 'vec_w', anno: 'cva_w' },
+  img:  { map: 'img_w', anno: 'cia_w' },
+  ter:  { map: 'ter_w', anno: 'cta_w' }
+};
+
+const SUBDOMAINS = ['0','1','2','3','4','5','6','7'];
+
+function tileUrl(t, key) {
+  const s = SUBDOMAINS[Math.floor(Math.random() * 8)];
+  return `https://t${s}.tianditu.gov.cn/DataServer?T=${t}&x={x}&y={y}&l={z}&tk=${key}`;
+}
+
+// ── 初始化地图 ──
+function initMap() {
+  const key = document.getElementById('keyInput').value.trim();
+  if (!key) { alert('请先输入天地图 Key'); return; }
+  if (map) { map.remove(); map = null; }
+
+  map = new maplibregl.Map({
+    container: 'map',
+    style: { version: 8, sources: {}, layers: [] },
+    center: [116.4075, 39.9042],
+    zoom: 12,
+    maxZoom: 18,
+    minZoom: 1
+  });
+
+  map.on('load', () => {
+    // 底图
+    map.addSource('tdt-base', {
+      type: 'raster',
+      tiles: [tileUrl(LAYERS[currentType].map, key)],
+      tileSize: 256
+    });
+    map.addLayer({ id: 'tdt-base-layer', type: 'raster', source: 'tdt-base' });
+
+    // 注记
+    map.addSource('tdt-anno', {
+      type: 'raster',
+      tiles: [tileUrl(LAYERS[currentType].anno, key)],
+      tileSize: 256
+    });
+    map.addLayer({ id: 'tdt-anno-layer', type: 'raster', source: 'tdt-anno' });
+
+    document.getElementById('info').textContent = '✅ 地图加载成功 — 类型: ' + currentType;
+  });
+
+  map.on('click', (e) => {
+    document.getElementById('info').textContent =
+      `地图点击: ${e.lngLat.lat.toFixed(6)}, ${e.lngLat.lng.toFixed(6)}`;
+  });
+
+  // 长按模拟: mousedown + 800ms
+  let longPressTimer = null;
+  map.on('mousedown', (e) => {
+    longPressTimer = setTimeout(() => {
+      document.getElementById('info').textContent =
+        `长按位置: ${e.lngLat.lat.toFixed(6)}, ${e.lngLat.lng.toFixed(6)}`;
+    }, 800);
+  });
+  map.on('mouseup', () => { if (longPressTimer) clearTimeout(longPressTimer); });
+  map.on('mousemove', () => { if (longPressTimer) clearTimeout(longPressTimer); });
+
+  // 相机移动完成 (等效 cameraChange)
+  map.on('moveend', () => {
+    const c = map.getCenter();
+    document.getElementById('info').textContent =
+      `视野变化: ${c.lat.toFixed(6)}, ${c.lng.toFixed(6)} | zoom=${map.getZoom().toFixed(1)}`;
+  });
+
+  map.on('error', (e) => {
+    console.error('MapLibre 错误:', e);
+    document.getElementById('info').textContent = '❌ 瓦片加载失败，请检查 Key 是否正确';
+  });
+}
+
+// ── 切换图层 ──
+function switchLayer(type) {
+  if (!map || !map.loaded()) { alert('地图尚未加载'); return; }
+  currentType = type;
+  const key = document.getElementById('keyInput').value.trim();
+  // 更新 source tiles
+  map.getSource('tdt-base').tiles = [tileUrl(LAYERS[type].map, key)];
+  map.getSource('tdt-anno').tiles = [tileUrl(LAYERS[type].anno, key)];
+  // 触发刷新：source 的 tiles 变更需手动 reload
+  map.getSource('tdt-base').setTiles([tileUrl(LAYERS[type].map, key)]);
+  map.getSource('tdt-anno').setTiles([tileUrl(LAYERS[type].anno, key)]);
+  document.getElementById('info').textContent = '🔄 已切换到: ' + type;
+}
+
+// ── 标记 ──
+function addMarkerDemo() {
+  if (!map) return;
+  const c = map.getCenter();
+  const m = new maplibregl.Marker({ color: '#FF4444' })
+    .setLngLat([c.lng, c.lat])
+    .setPopup(new maplibregl.Popup().setHTML('<b>测试标记</b><br>点击地图任意位置移动视口'))
+    .addTo(map);
+  markers.push(m);
+  document.getElementById('info').textContent = '📍 标记已添加';
+}
+
+function clearMarkers() {
+  markers.forEach(m => m.remove());
+  markers = [];
+  document.getElementById('info').textContent = '标记已清除';
+}
+</script>
+</body>
+</html>

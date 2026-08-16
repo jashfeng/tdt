@@ -1,0 +1,7 @@
+<script lang="uts">
+export default {
+  onLaunch() {
+    console.log('天地图示例启动')
+  }
+}
+</script>

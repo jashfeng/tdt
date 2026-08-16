@@ -1,0 +1,1329 @@
+import { MLNMapView, MLNStyle, MLNMapViewDelegate, MLNMapCamera } from "MapLibre"
+import { MLNRasterTileSource } from "MapLibre"
+import { MLNRasterStyleLayer } from "MapLibre"
+import { MLNPointAnnotation } from "MapLibre"
+import { MLNPolygon } from "MapLibre"
+import { MLNPolyline } from "MapLibre"
+import { MLNFillStyleLayer } from "MapLibre"
+import { MLNLineStyleLayer } from "MapLibre"
+import { MLNShapeSource } from "MapLibre"
+import { MLNCoordinateBoundsMake } from "MapLibre"
+import { CLLocationCoordinate2DMake, CLLocationManager, CLLocation } from "CoreLocation"
+import { UITapGestureRecognizer, UILongPressGestureRecognizer, UIColor, UIGraphicsImageRenderer, UIImagePNGRepresentation } from "UIKit"
+import { UIEdgeInsets } from "UIKit"
+import { NSURL, NSExpression, NSBundle, NSString } from "Foundation"
+import { TDMapOptions, MapClickDetail, MapBoundsDetail, MapErrorDetail, MapSizeDetail, MapViewportDetail, MapClickCallback, MapReadyCallback, MapErrorCallback, MarkerClickCallback, GeocodeCallback, SearchOptions, MapLongClickCallback, CameraChangeCallback } from '../interface.uts'
+
+// ⚠️ 天地图 Key 类型说明（自新系统升级后严格区分，混用会导致瓦片不显示）:
+//   - "浏览器端" key：校验 Referer 头 + 域名白名单 → 原生 App 不发送浏览器 Referer → 403 被拒 → 灰白背景
+//   - "服务端" key：校验 IP 白名单（留空则不限制）→ 原生 App 推荐使用
+//   - "Android平台" key：专用于移动端原生 API
+//   🔧 iOS/鸿蒙也需使用"服务端"类型 key（IP 白名单留空），三端通用
+
+let mapView: MLNMapView | null = null
+let mapViewDelegate: TDTMapDelegate | null = null
+let onClickCallback: MapClickCallback | null = null
+let onReadyCallback: MapReadyCallback | null = null
+let onErrorCallback: MapErrorCallback | null = null
+let currentApiKey: string = ''
+let currentMapType: string = 'vec'
+let polygons: Array<any> = []
+let polylines: Array<any> = []
+let circles: Array<any> = []
+let rectangles: Array<any> = []
+
+// ── 覆盖物 ID 追踪系统 ──
+// 为每个添加的覆盖物分配唯一 ID，支持 removeOverlay/showOverlay/hideOverlay 单个操作
+let overlayIdCounter: number = 0
+let overlayMap = new Map<number, OverlayEntry>()
+
+type OverlayEntry = {
+    id: number
+    type: string  // 'marker' | 'polygon' | 'polyline' | 'circle' | 'rectangle' | 'label'
+    nativeRef: any  // MLNPointAnnotation or { source: MLNShapeSource, layer: MLNStyleLayer }
+    isVisible: boolean
+}
+
+let markerClickCallback: MarkerClickCallback | null = null
+let mapLongClickCallback: MapLongClickCallback | null = null
+let cameraChangeCallback: CameraChangeCallback | null = null
+let didSelectMarkerFlag: boolean = false
+
+// 分配 overlay ID 并存入追踪表
+function allocateOverlayId(type: string, nativeRef: any): number {
+    overlayIdCounter++
+    const id = overlayIdCounter
+    overlayMap.set(id, { id: id, type: type, nativeRef: nativeRef, isVisible: true })
+    return id
+}
+
+// 从 overlayMap 中清除指定类型的所有条目
+function clearOverlayType(type: string): void {
+    const keysToRemove: Array<number> = []
+    overlayMap.forEach((entry: OverlayEntry, key: number) => {
+        if (entry.type == type) {
+            keysToRemove.push(key)
+        }
+    })
+    for (let i = 0; i < keysToRemove.length; i++) {
+        overlayMap.delete(keysToRemove[i])
+    }
+}
+
+// 天地图 DataServer XYZ 格式瓦片 URL（与鸿蒙端一致，已验证可用）
+function getTileUrl(layerType: string): string {
+    return 'https://t0.tianditu.gov.cn/DataServer?T=' + layerType + '_w&x={x}&y={y}&l={z}&tk='
+}
+
+// 生成 8 个子域名的瓦片 URL 数组（并行加载，性能提升 6-8 倍）
+function buildTileURLsArray(layerType: string, apiKey: string): Array<string> {
+    let urls: Array<string> = []
+    for (let s = 0; s < 8; s++) {
+        urls.push('https://t' + s.toString() + '.tianditu.gov.cn/DataServer?T=' + layerType + '_w&x={x}&y={y}&l={z}&tk=' + apiKey)
+    }
+    return urls
+}
+
+// 插件内置空白样式（替代 demotiles.maplibre.org，该域名在国内被墙）
+// style.json 位于 utssdk/app-ios/Resources/，打包时由 uni-app x 拷入主 Bundle
+// 如果 Resources/style.json 被打包工具遗漏，使用 inline data URL 空白样式作为兜底
+function getEmptyStyleURL(): NSURL {
+    const path = NSBundle.mainBundle.pathForResource("style", "json")
+    if (path != null) {
+        console.log("TDTMap: 使用内置空白样式")
+        return NSURL.fileURLWithPath(path)!
+    }
+    // 兜底：使用内联空样式 JSON 的 data URL，避免回退被墙域名
+    console.warn("TDTMap: style.json 未找到，使用内联空白样式")
+    const inlineJson = "{\"version\":8,\"name\":\"tdt-empty\",\"sources\":{},\"layers\":[]}"
+    return NSURL.URLWithString("data:application/json," + inlineJson)!
+}
+
+// 样式加载完成代理：Source/Layer 必须等样式加载完成后添加（MapLibre iOS 官方约束）
+class TDTMapDelegate implements MLNMapViewDelegate {
+    private opts: TDMapOptions
+
+    constructor(opts: TDMapOptions) {
+        this.opts = opts
+    }
+
+    // context7 验证：协议要求 ObjC selector 为 mapView:didFinishLoadingStyle:
+    // UTS 中方法名 mapView + 参数名 didFinishLoadingStyle 生成正确 selector
+    @objc mapView(mapView: MLNMapView, didFinishLoadingStyle: MLNStyle): void {
+        // 预创建所有图层对（vec/img/ter），非活跃图层设为不可见
+        addTiandituTileLayer(mapView, 'vec', this.opts.apiKey, this.opts.mapType == 'vec' ? 'visible' : 'none')
+        addTiandituTileLayer(mapView, 'img', this.opts.apiKey, this.opts.mapType == 'img' ? 'visible' : 'none')
+        addTiandituTileLayer(mapView, 'ter', this.opts.apiKey, this.opts.mapType == 'ter' ? 'visible' : 'none')
+
+        // 设置初始视角（CLLocationCoordinate2D 是 C 结构体，必须用 Make 函数构造）
+        const center = CLLocationCoordinate2DMake(this.opts.latitude, this.opts.longitude)
+        mapView.setCenterCoordinate(center, this.opts.zoom, false)
+
+        if (onReadyCallback != null) {
+            onReadyCallback()
+        }
+    }
+
+    // context7 验证：MLNMapViewDelegate 的标注点击回调，selector 为 mapView:didSelectAnnotation:
+    @objc mapView(mapView: MLNMapView, didSelectAnnotation: any): void {
+        const cb = markerClickCallback
+        if (cb != null) {
+            didSelectMarkerFlag = true
+            // context7 验证：@objc 方法参数名即变量名，didSelectAnnotation 对应该 selector 的第二个参数
+            // 错误使用 annotation（未定义变量）会导致运行时 ReferenceError，标记点击事件完全失效
+            const coord = (didSelectAnnotation as MLNPointAnnotation).coordinate
+            cb({ lat: coord.latitude, lng: coord.longitude })
+        }
+    }
+
+    // v1.4.0: 相机变化回调 — context7 验证：MLNMapViewDelegate.mapViewCameraDidChange 在视野变化时触发
+    mapViewCameraDidChange(mapView: MLNMapView): void {
+        const cb = cameraChangeCallback
+        if (cb != null) {
+            // 防御：虽然 delegate 触发时 camera 理论上不为 nil，但 ObjC 桥接层偶见 nil 传递
+            const cam = mapView.camera
+            if (cam != null) {
+                const coordinate = cam.centerCoordinate
+                cb({ lat: coordinate.latitude, lng: coordinate.longitude })
+            }
+        }
+    }
+}
+
+@UTSJS.keepAlive
+export function initMap(
+    container: UniNativeViewElement,
+    options: TDMapOptions,
+    onClick: MapClickCallback,
+    onReady: MapReadyCallback,
+    onError: MapErrorCallback
+): void {
+    if (options.apiKey == null || options.apiKey.length == 0) {
+        onError({ code: 1, message: "API Key 为空" })
+        return
+    }
+
+    onClickCallback = onClick
+    onReadyCallback = onReady
+    onErrorCallback = onError
+    currentApiKey = options.apiKey
+    currentMapType = options.mapType
+
+    console.log("TDTMap: initMap key=" + (options.apiKey.length > 0 ? "***" : "空") + " type=" + options.mapType)
+
+    // 诊断日志：输出瓦片 URL（复制到浏览器验证 key 是否有效）
+    const diagUrl = getTileUrl('vec') + options.apiKey
+    console.log("TDTMap: 诊断URL(浏览器验证)= " + diagUrl.replace("{x}", "537").replace("{y}", "389").replace("{z}", "10"))
+
+    const frame = container.bounds
+    const styleURL = getEmptyStyleURL()
+    // 创建时必须指定 styleURL，否则 style 恒为 nil，图层永远无法添加
+    mapView = new MLNMapView(frame, styleURL)
+    container.bindIOSView(mapView)
+
+    // v1.6.0: 隐藏 MapLibre 原生 logo 与 attribution button —— MapLibre 默认 logo（左下）
+    // 与 attribution ℹ（右下）会与 uvue 版权条重叠且版权信息对天地图场景是错误的；
+    // MapLibre BSD-3 许可不强制显示 logo，天地图瓦片不含 OSM 数据无 attribution 义务，
+    // 版权统一由 uvue 版权条承担。
+    // context7 验证（2026-08-16 复核）：Jawg Maps（MapLibre 官方 iOS 集成文档）
+    // add-geometry 示例明确使用 mapView.logoView.isHidden = true（Swift 名为 isHidden，
+    // UTS 桥接 Objective-C 属性名 hidden，写法一致）；attributionButton 为 Mapbox iOS 6
+    // 系公开只读属性，MapLibre iOS（MLN）为同名 fork，编译期若报错按此注释调整
+    // UTS 对 `?.` 赋值（Kotlin 规则）支持不明确，改为判空后赋值（与文件既有风格一致）
+    const logoView = mapView.logoView
+    if (logoView != null) {
+        logoView.hidden = true
+    }
+    const attrBtn = mapView.attributionButton
+    if (attrBtn != null) {
+        attrBtn.hidden = true
+    }
+
+    // context7 验证：mapView.delegate 是 weak 引用，new 返回的临时对象会在语句结束时释放
+    // 必须先存入局部变量强引用，再赋值给 delegate，否则 delegate 立即变为 nil
+    const d = new TDTMapDelegate(options)
+    mapView.delegate = d
+    mapViewDelegate = d
+
+    const tapGesture = new UITapGestureRecognizer((gesture: UITapGestureRecognizer) => {
+        // 如果刚刚选中了标记（didSelectAnnotation 触发），跳过地图点击回调
+        if (didSelectMarkerFlag) {
+            didSelectMarkerFlag = false
+            return
+        }
+        if (mapView != null && onClickCallback != null) {
+            const point = gesture.locationInView(mapView)
+            const coordinate = mapView.convertPoint(point, toCoordinateFromView: mapView)
+            onClickCallback({
+                lat: coordinate.latitude,
+                lng: coordinate.longitude
+            })
+        }
+    })
+    tapGesture.cancelsTouchesInView = false
+    mapView.addGestureRecognizer(tapGesture)
+
+    // v1.4.0: 长按手势 — context7 验证：UILongPressGestureRecognizer 为离散手势，
+    // 但 ObjC 运行时会以 .began/.ended 多次触发；必须按 state == 1 (UIGestureRecognizerStateBegan) 过滤，
+    // 确保每次长按只回调一次
+    const longPress = new UILongPressGestureRecognizer((gesture: UILongPressGestureRecognizer) => {
+        if (gesture.state != 1) return  // 1 == UIGestureRecognizerStateBegan，仅首次触发
+        const cb = mapLongClickCallback
+        if (cb != null && mapView != null) {
+            const point = gesture.locationInView(mapView)
+            const coordinate = mapView.convertPoint(point, toCoordinateFromView: mapView)
+            cb({ lat: coordinate.latitude, lng: coordinate.longitude })
+        }
+    })
+    longPress.cancelsTouchesInView = false
+    mapView.addGestureRecognizer(longPress)
+}
+
+function addTiandituTileLayer(map: MLNMapView, mapType: string, apiKey: string, visibility: string): void {
+    try {
+        let baseLayer: string
+        let labelLayer: string
+
+        switch (mapType) {
+            case 'img':
+                baseLayer = 'img'
+                labelLayer = 'cia'
+                break
+            case 'ter':
+                baseLayer = 'ter'
+                labelLayer = 'cta'
+                break
+            default:
+                baseLayer = 'vec'
+                labelLayer = 'cva'
+                break
+        }
+
+        // 生成 8 个子域名 URL（并行加载，浏览器单域名限制 6 连接）
+        const baseTileURLs = buildTileURLsArray(baseLayer, apiKey)
+        const labelTileURLs = buildTileURLsArray(labelLayer, apiKey)
+
+        const baseSourceId = "tdt-base-" + mapType
+        const baseSource = new MLNRasterTileSource(baseSourceId, baseTileURLs, null)
+        map.style?.addSource(baseSource)
+        const baseLayerId = "tdt-base-" + mapType + "-layer"
+        const baseLayerObj = new MLNRasterStyleLayer(baseLayerId, baseSource)
+        baseLayerObj.minimumZoomLevel = 1
+        baseLayerObj.maximumZoomLevel = 18
+        if (visibility == "none") {
+            baseLayerObj.isVisible = false
+        }
+        map.style?.addLayer(baseLayerObj)
+
+        const labelSourceId = "tdt-label-" + mapType
+        const labelSource = new MLNRasterTileSource(labelSourceId, labelTileURLs, null)
+        map.style?.addSource(labelSource)
+        const labelLayerId = "tdt-label-" + mapType + "-layer"
+        const labelLayerObj = new MLNRasterStyleLayer(labelLayerId, labelSource)
+        labelLayerObj.minimumZoomLevel = 1
+        labelLayerObj.maximumZoomLevel = 18
+        if (visibility == "none") {
+            labelLayerObj.isVisible = false
+        }
+        map.style?.addLayer(labelLayerObj)
+    } catch (e) {
+        if (onErrorCallback != null) {
+            onErrorCallback({ code: 3, message: "瓦片加载失败: " + e.toString() })
+        }
+    }
+}
+
+export function setCenter(lat: number, lng: number): void {
+    if (mapView != null) {
+        const center = CLLocationCoordinate2DMake(lat, lng)
+        mapView.setCenterCoordinate(center, true)
+    }
+}
+
+export function setZoom(zoom: number): void {
+    if (mapView != null) {
+        mapView.setZoomLevel(zoom, true)
+    }
+}
+
+export function getCenter(): MapClickDetail {
+    if (mapView != null) {
+        const coordinate = mapView.centerCoordinate
+        return { lat: coordinate.latitude, lng: coordinate.longitude }
+    }
+    return { lat: 0, lng: 0 }
+}
+
+export function getZoom(): number {
+    if (mapView != null) {
+        return mapView.zoomLevel
+    }
+    return 0
+}
+
+export function fitBounds(minLat: number, minLng: number, maxLat: number, maxLng: number, padding: number): void {
+    if (mapView == null) return
+    const sw = CLLocationCoordinate2DMake(minLat, minLng)
+    const ne = CLLocationCoordinate2DMake(maxLat, maxLng)
+    const bounds = MLNCoordinateBoundsMake(sw, ne)
+    const edgePadding = new UIEdgeInsets(padding, padding, padding, padding)
+    mapView.setVisibleCoordinateBounds(bounds, edgePadding, true)
+}
+
+export function addMarker(lat: number, lng: number, title: string, snippet?: string): number {
+    if (mapView != null) {
+        const annotation = new MLNPointAnnotation()
+        annotation.coordinate = CLLocationCoordinate2DMake(lat, lng)
+        annotation.title = title
+        // v1.3.0: 设置 subtitle 以支持信息窗口
+        if (snippet != null && snippet.length > 0) {
+            annotation.subtitle = snippet
+        }
+        mapView.addAnnotation(annotation)
+        return allocateOverlayId('marker', annotation)
+    }
+    return 0
+}
+
+export function clearMarkers(): void {
+    // 移除所有标记和文字标注（从 overlayMap 追踪的）
+    overlayMap.forEach((entry: OverlayEntry, id: number) => {
+        if ((entry.type == 'marker' || entry.type == 'label') && entry.nativeRef != null) {
+            mapView?.removeAnnotation(entry.nativeRef as MLNPointAnnotation)
+        }
+    })
+    clearOverlayType('marker')
+    clearOverlayType('label')
+}
+
+// 将十六进制颜色字符串（如 '#FF0000' / '#FF000033'）转为 UIColor
+// 格式：AARRGGBB（与 Android Color.parseColor 一致，alpha 在前）
+function parseColor(color: string): UIColor {
+    let hex = color
+    if (hex.hasPrefix('#')) { hex = hex.substringFromIndex(1) }
+    let r: number = 0, g: number = 0, b: number = 0, a: number = 255
+    if (hex.length == 8) {
+        // AARRGGBB 格式：alpha 在前
+        a = parseInt(hex.substring(0, 2), 16)
+        r = parseInt(hex.substring(2, 4), 16)
+        g = parseInt(hex.substring(4, 6), 16)
+        b = parseInt(hex.substring(6, 8), 16)
+    } else {
+        r = parseInt(hex.substring(0, 2), 16)
+        g = parseInt(hex.substring(2, 4), 16)
+        b = parseInt(hex.substring(4, 6), 16)
+    }
+    return UIColor.colorWithRed(r / 255.0, g / 255.0, b / 255.0, a / 255.0)
+}
+
+export function addPolygon(points: Array<MapClickDetail>, color: string, fillColor: string): number {
+    if (mapView == null || mapView.style == null) return 0
+    const coordinates: Array<CLLocationCoordinate2D> = []
+    for (let i = 0; i < points.length; i++) {
+        coordinates.push(CLLocationCoordinate2DMake(points[i].lat, points[i].lng))
+    }
+    const polygonId = "tdt-polygon-" + polygons.length.toString()
+    try {
+        const polygon = MLNPolygon(coordinates, points.length)
+        const source = new MLNShapeSource(polygonId, polygon, null)
+        mapView.style?.addSource(source)
+        const layer = new MLNFillStyleLayer(polygonId + "-layer", source)
+        layer.fillColor = NSExpression(forConstantValue: parseColor(fillColor))
+        layer.fillOutlineColor = NSExpression(forConstantValue: parseColor(color))
+        mapView.style?.addLayer(layer)
+        const entry = { source: source, layer: layer }
+        polygons.push(entry)
+        return allocateOverlayId('polygon', entry)
+    } catch (e) {
+        if (onErrorCallback != null) {
+            onErrorCallback({ code: 4, message: "添加多边形失败: " + e.toString() })
+        }
+        return 0
+    }
+}
+
+export function clearPolygons(): void {
+    if (mapView == null) {
+        clearOverlayType('polygon')
+        polygons = []
+        return
+    }
+    for (let i = 0; i < polygons.length; i++) {
+        mapView.style?.removeLayer(polygons[i].layer)
+        mapView.style?.removeSource(polygons[i].source)
+    }
+    clearOverlayType('polygon')
+    polygons = []
+}
+
+// ==================== 覆盖物：折线 ====================
+
+export function addPolyline(points: Array<MapClickDetail>, color: string, width: number): number {
+    if (mapView == null || mapView.style == null || points.length < 2) return 0
+    const coordinates: Array<CLLocationCoordinate2D> = []
+    for (let i = 0; i < points.length; i++) {
+        coordinates.push(CLLocationCoordinate2DMake(points[i].lat, points[i].lng))
+    }
+    const polylineId = "tdt-polyline-" + polylines.length.toString()
+    try {
+        const polyline = MLNPolyline(coordinates, points.length)
+        const source = new MLNShapeSource(polylineId, polyline, null)
+        mapView.style?.addSource(source)
+        const layer = new MLNLineStyleLayer(polylineId + "-layer", source)
+        layer.lineColor = NSExpression(forConstantValue: parseColor(color))
+        layer.lineWidth = NSExpression(forConstantValue: width)
+        mapView.style?.addLayer(layer)
+        const entry = { source: source, layer: layer }
+        polylines.push(entry)
+        return allocateOverlayId('polyline', entry)
+    } catch (e) {
+        if (onErrorCallback != null) {
+            onErrorCallback({ code: 4, message: "添加折线失败: " + e.toString() })
+        }
+        return 0
+    }
+}
+
+// ==================== 覆盖物：圆（多边形近似，36 边） ====================
+
+const EARTH_RADIUS = 6378137.0
+
+function circleToPolygonCoords(lat: number, lng: number, radius: number, segments: number): Array<CLLocationCoordinate2D> {
+    let result: Array<CLLocationCoordinate2D> = []
+    const dLat = radius / EARTH_RADIUS * (180.0 / Math.PI)
+    const dLng = radius / (EARTH_RADIUS * Math.cos(lat * Math.PI / 180.0)) * (180.0 / Math.PI)
+    for (let i = 0; i < segments; i++) {
+        const angle = (2.0 * Math.PI * i) / segments
+        result.push(CLLocationCoordinate2DMake(lat + dLat * Math.cos(angle), lng + dLng * Math.sin(angle)))
+    }
+    return result
+}
+
+export function addCircle(lat: number, lng: number, radius: number, color: string, fillColor: string): number {
+    if (mapView == null || mapView.style == null) return 0
+    const circleCoords = circleToPolygonCoords(lat, lng, radius, 36)
+    const circleId = "tdt-circle-" + circles.length.toString()
+    try {
+        const polygon = MLNPolygon(circleCoords, circleCoords.length)
+        const source = new MLNShapeSource(circleId, polygon, null)
+        mapView.style?.addSource(source)
+        const layer = new MLNFillStyleLayer(circleId + "-layer", source)
+        layer.fillColor = NSExpression(forConstantValue: parseColor(fillColor))
+        layer.fillOutlineColor = NSExpression(forConstantValue: parseColor(color))
+        mapView.style?.addLayer(layer)
+        const entry = { source: source, layer: layer }
+        circles.push(entry)
+        return allocateOverlayId('circle', entry)
+    } catch (e) {
+        if (onErrorCallback != null) {
+            onErrorCallback({ code: 4, message: "添加圆失败: " + e.toString() })
+        }
+        return 0
+    }
+}
+
+// ==================== 覆盖物：矩形 ====================
+
+export function addRectangle(minLat: number, minLng: number, maxLat: number, maxLng: number, color: string, fillColor: string): number {
+    if (mapView == null || mapView.style == null) return 0
+    const coordinates: Array<CLLocationCoordinate2D> = [
+        CLLocationCoordinate2DMake(minLat, minLng),
+        CLLocationCoordinate2DMake(maxLat, minLng),
+        CLLocationCoordinate2DMake(maxLat, maxLng),
+        CLLocationCoordinate2DMake(minLat, maxLng)
+    ]
+    const rectId = "tdt-rect-" + rectangles.length.toString()
+    try {
+        const polygon = MLNPolygon(coordinates, 4)
+        const source = new MLNShapeSource(rectId, polygon, null)
+        mapView.style?.addSource(source)
+        const layer = new MLNFillStyleLayer(rectId + "-layer", source)
+        layer.fillColor = NSExpression(forConstantValue: parseColor(fillColor))
+        layer.fillOutlineColor = NSExpression(forConstantValue: parseColor(color))
+        mapView.style?.addLayer(layer)
+        const entry = { source: source, layer: layer }
+        rectangles.push(entry)
+        return allocateOverlayId('rectangle', entry)
+    } catch (e) {
+        if (onErrorCallback != null) {
+            onErrorCallback({ code: 4, message: "添加矩形失败: " + e.toString() })
+        }
+        return 0
+    }
+}
+
+// ==================== 覆盖物：文字标注 ====================
+
+export function addLabel(lat: number, lng: number, text: string): number {
+    if (mapView != null) {
+        const annotation = new MLNPointAnnotation()
+        annotation.coordinate = CLLocationCoordinate2DMake(lat, lng)
+        annotation.title = text
+        mapView.addAnnotation(annotation)
+        return allocateOverlayId('label', annotation)
+    }
+    return 0
+}
+
+// ==================== 覆盖物：批量标记 ====================
+
+export function setMarkers(markers: Array<MapClickDetail>): Array<number> {
+    clearMarkers()
+    const ids: Array<number> = []
+    if (mapView == null || markers.length == 0) return ids
+    for (let i = 0; i < markers.length; i++) {
+        const pt = markers[i]
+        const annotation = new MLNPointAnnotation()
+        annotation.coordinate = CLLocationCoordinate2DMake(pt.lat, pt.lng)
+        mapView.addAnnotation(annotation)
+        ids.push(allocateOverlayId('marker', annotation))
+    }
+    return ids
+}
+
+// ==================== 覆盖物：清除全部 ====================
+
+export function clearOverlays(): void {
+    clearMarkers()
+    clearPolygons()
+    if (mapView == null) {
+        clearOverlayType('polyline')
+        clearOverlayType('circle')
+        clearOverlayType('rectangle')
+        polylines = []
+        circles = []
+        rectangles = []
+        return
+    }
+    for (let i = 0; i < polylines.length; i++) {
+        mapView.style?.removeLayer(polylines[i].layer)
+        mapView.style?.removeSource(polylines[i].source)
+    }
+    polylines = []
+    clearOverlayType('polyline')
+    for (let i = 0; i < circles.length; i++) {
+        mapView.style?.removeLayer(circles[i].layer)
+        mapView.style?.removeSource(circles[i].source)
+    }
+    circles = []
+    clearOverlayType('circle')
+    for (let i = 0; i < rectangles.length; i++) {
+        mapView.style?.removeLayer(rectangles[i].layer)
+        mapView.style?.removeSource(rectangles[i].source)
+    }
+    rectangles = []
+    clearOverlayType('rectangle')
+}
+
+export function switchMapType(mapType: string): void {
+    if (mapView == null) return
+    currentMapType = mapType
+    const types = ["vec", "img", "ter"]
+    for (let i = 0; i < types.length; i++) {
+        const type = types[i]
+        const isVisible = type === mapType
+        const baseLayer = mapView.style?.layerWithIdentifier("tdt-base-" + type + "-layer")
+        if (baseLayer != null) baseLayer.isVisible = isVisible
+        const labelLayer = mapView.style?.layerWithIdentifier("tdt-label-" + type + "-layer")
+        if (labelLayer != null) labelLayer.isVisible = isVisible
+    }
+}
+
+export function snapshot(): ArrayBuffer {
+    if (mapView == null) {
+        if (onErrorCallback != null) {
+            onErrorCallback({ code: 4, message: "Map 未初始化" })
+        }
+        return new ArrayBuffer(0)
+    }
+    try {
+        const renderer = UIGraphicsImageRenderer(mapView.bounds.size)
+        // context7 验证：UTS ObjC 互操作层使用 ObjC selector 名称桥接，
+        // drawHierarchy 是 Swift 3+ 名称，ObjC selector 是 drawViewHierarchyInRect:afterScreenUpdates:
+        const image = renderer.imageWithActions((context) => {
+            mapView.drawViewHierarchyInRect(mapView.bounds, true)
+        })
+        // UIImagePNGRepresentation → NSData → ArrayBuffer（UTS 官方 API：ArrayBuffer.fromData）
+        const data = UIImagePNGRepresentation(image)
+        if (data != null) {
+            return ArrayBuffer.fromData(data)
+        }
+    } catch (e) {
+        if (onErrorCallback != null) {
+            onErrorCallback({ code: 4, message: "Snapshot 失败: " + e.toString() })
+        }
+    }
+    return new ArrayBuffer(0)
+}
+
+export function onResume(): void {
+    // iOS 端无需额外处理
+}
+
+export function onPause(): void {
+    // iOS 端无需额外处理
+}
+
+export function destroyMap(): void {
+    if (mapView != null) {
+        mapView.removeFromSuperview()
+        mapView = null
+        const delegate = mapViewDelegate
+        mapViewDelegate = null
+        onClickCallback = null
+        onReadyCallback = null
+        onErrorCallback = null
+        markerClickCallback = null
+        mapLongClickCallback = null
+        cameraChangeCallback = null
+        polygons = []
+        polylines = []
+        circles = []
+        rectangles = []
+        overlayMap.clear()
+        overlayIdCounter = 0
+        currentApiKey = ''
+        currentMapType = 'vec'
+        didSelectMarkerFlag = false
+        userLocationShown = false
+        locationManager?.stopUpdatingLocation()
+        locationManager = null
+        locationCallback = null
+        locationErrorCallback = null
+        // 若定位轮询定时器仍在运行（destroyMap 早于 getUserLocation 回调），立即 invalidate 防止内存泄漏
+        if (locationTimer != null) {
+            locationTimer.invalidate()
+            locationTimer = null
+        }
+        customTileSources.clear()
+        if (delegate != null) {
+            UTSiOS.destroyInstance(delegate)
+        }
+    }
+}
+
+// ==================== 缩放控制 ====================
+
+export function zoomIn(): void {
+    if (mapView != null) {
+        const currentZoom = mapView.zoomLevel
+        mapView.setZoomLevel(currentZoom + 1, true)
+    }
+}
+
+export function zoomOut(): void {
+    if (mapView != null) {
+        const currentZoom = mapView.zoomLevel
+        mapView.setZoomLevel(currentZoom - 1, true)
+    }
+}
+
+export function setMinZoom(zoom: number): void {
+    if (mapView != null) {
+        mapView.minimumZoomLevel = zoom
+    }
+}
+
+export function setMaxZoom(zoom: number): void {
+    if (mapView != null) {
+        mapView.maximumZoomLevel = zoom
+    }
+}
+
+// ==================== 视野移动 ====================
+
+export function panTo(lat: number, lng: number, zoom?: number): void {
+    if (mapView == null) return
+    const center = CLLocationCoordinate2DMake(lat, lng)
+    if (zoom != null) {
+        mapView.setCenterCoordinate(center, zoom, true)
+    } else {
+        mapView.setCenterCoordinate(center, true)
+    }
+}
+
+export function centerAndZoom(lat: number, lng: number, zoom: number): void {
+    if (mapView == null) return
+    const center = CLLocationCoordinate2DMake(lat, lng)
+    mapView.setCenterCoordinate(center, zoom, false)
+}
+
+// ==================== 手势控制 ====================
+
+export function enableZoom(enabled: boolean): void {
+    if (mapView != null) {
+        mapView.zoomEnabled = enabled
+    }
+}
+
+export function enableDrag(enabled: boolean): void {
+    if (mapView != null) {
+        mapView.scrollEnabled = enabled
+    }
+}
+
+// ==================== 范围限制 ====================
+
+export function setMaxBounds(minLat: number, minLng: number, maxLat: number, maxLng: number): void {
+    if (mapView == null) return
+    console.warn("TDTMap: iOS setMaxBounds 为一次性限制（MapLibre iOS 无永久 cameraTargetBounds API），用户可继续平移缩放超出边界")
+    const sw = CLLocationCoordinate2DMake(minLat, minLng)
+    const ne = CLLocationCoordinate2DMake(maxLat, maxLng)
+    const bounds = MLNCoordinateBoundsMake(sw, ne)
+    // MapLibre iOS 无永久 cameraTargetBounds 属性，用 visibleCoordinateBounds 实现一次性限制
+    const edgePadding = new UIEdgeInsets(0, 0, 0, 0)
+    mapView.setVisibleCoordinateBounds(bounds, edgePadding, false)
+}
+
+// ==================== 信息获取 ====================
+
+export function getBounds(): MapBoundsDetail {
+    if (mapView != null) {
+        const bounds = mapView.visibleCoordinateBounds
+        // visibleCoordinateBounds 返回 MGLCoordinateBounds，含 sw 和 ne 属性
+        const sw = bounds.sw
+        const ne = bounds.ne
+        if (sw != null && ne != null) {
+            return {
+                minLat: sw.latitude,
+                minLng: sw.longitude,
+                maxLat: ne.latitude,
+                maxLng: ne.longitude
+            }
+        }
+    }
+    return { minLat: 0, minLng: 0, maxLat: 0, maxLng: 0 }
+}
+
+// ==================== 坐标转换（纯数学，三端通用） ====================
+// 算法来源：Wikipedia GCJ-02 article + eviltransform (GitHub)
+// 注意：禁止在天地图插件中引入 WGS84→GCJ02 转换（会反向引入偏差），仅提供 GCJ02→WGS84
+
+const GCJ_PI = 3.14159265358979323846
+const GCJ_A = 6378245.0
+const GCJ_EE = 0.00669342162296594323
+
+function isOutOfChina(lat: number, lng: number): boolean {
+    return lng < 72.004 || lng > 137.8347 || lat < 0.8293 || lat > 55.8271
+}
+
+function gcjTransformLat(x: number, y: number): number {
+    let ret = -100.0 + 2.0 * x + 3.0 * y + 0.2 * y * y + 0.1 * x * y + 0.2 * Math.sqrt(Math.abs(x))
+    ret += (20.0 * Math.sin(6.0 * x * GCJ_PI) + 20.0 * Math.sin(2.0 * x * GCJ_PI)) * 2.0 / 3.0
+    ret += (20.0 * Math.sin(y * GCJ_PI) + 40.0 * Math.sin(y / 3.0 * GCJ_PI)) * 2.0 / 3.0
+    ret += (160.0 * Math.sin(y / 12.0 * GCJ_PI) + 320.0 * Math.sin(y * GCJ_PI / 30.0)) * 2.0 / 3.0
+    return ret
+}
+
+function gcjTransformLng(x: number, y: number): number {
+    let ret = 300.0 + x + 2.0 * y + 0.1 * x * x + 0.1 * x * y + 0.1 * Math.sqrt(Math.abs(x))
+    ret += (20.0 * Math.sin(6.0 * x * GCJ_PI) + 20.0 * Math.sin(2.0 * x * GCJ_PI)) * 2.0 / 3.0
+    ret += (20.0 * Math.sin(x * GCJ_PI) + 40.0 * Math.sin(x / 3.0 * GCJ_PI)) * 2.0 / 3.0
+    ret += (150.0 * Math.sin(x / 12.0 * GCJ_PI) + 300.0 * Math.sin(x / 30.0 * GCJ_PI)) * 2.0 / 3.0
+    return ret
+}
+
+type Gcj02Delta = { dLat: number, dLng: number }
+function wgs84ToGcj02Delta(lat: number, lng: number): Gcj02Delta {
+    const dLat = gcjTransformLat(lng - 105.0, lat - 35.0)
+    const dLng = gcjTransformLng(lng - 105.0, lat - 35.0)
+    const radLat = lat / 180.0 * GCJ_PI
+    let magic = Math.sin(radLat)
+    magic = 1 - GCJ_EE * magic * magic
+    const sqrtMagic = Math.sqrt(magic)
+    const dLatFinal = (dLat * 180.0) / ((GCJ_A * (1 - GCJ_EE)) / (magic * sqrtMagic) * GCJ_PI)
+    const dLngFinal = (dLng * 180.0) / (GCJ_A / sqrtMagic * Math.cos(radLat) * GCJ_PI)
+    return { dLat: dLatFinal, dLng: dLngFinal }
+}
+
+export function gcj02ToWgs84(lat: number, lng: number): MapClickDetail {
+    if (isOutOfChina(lat, lng)) {
+        return { lat: lat, lng: lng }
+    }
+    let wgsLat = lat
+    let wgsLng = lng
+    for (let i = 0; i < 3; i++) {
+        const delta = wgs84ToGcj02Delta(wgsLat, wgsLng)
+        const gcjLat = wgsLat + delta.dLat
+        const gcjLng = wgsLng + delta.dLng
+        wgsLat -= (gcjLat - lat)
+        wgsLng -= (gcjLng - lng)
+    }
+    return { lat: wgsLat, lng: wgsLng }
+}
+
+// ══════════════════════════════════════════════
+// 覆盖物管理：单个操作
+// ══════════════════════════════════════════════
+
+// context7 验证：iOS 使用 style.removeLayer/removeSource 移除形状，removeAnnotation 移除标注
+export function removeOverlay(id: number): void {
+    const entry = overlayMap.get(id)
+    if (entry == null || mapView == null) {
+        overlayMap.delete(id)
+        return
+    }
+    const ref = entry.nativeRef
+    if (ref == null) {
+        overlayMap.delete(id)
+        return
+    }
+    if (entry.type == 'marker' || entry.type == 'label') {
+        mapView.removeAnnotation(ref as MLNPointAnnotation)
+    } else {
+        // polygon, polyline, circle, rectangle — all use source+layer pattern
+        mapView.style?.removeLayer(ref.layer)
+        mapView.style?.removeSource(ref.source)
+        // 同步清理类型数组
+        if (entry.type == 'polygon') {
+            polygons = polygons.filter(e => e !== ref)
+        } else if (entry.type == 'polyline') {
+            polylines = polylines.filter(e => e !== ref)
+        } else if (entry.type == 'circle') {
+            circles = circles.filter(e => e !== ref)
+        } else if (entry.type == 'rectangle') {
+            rectangles = rectangles.filter(e => e !== ref)
+        }
+    }
+    overlayMap.delete(id)
+}
+
+// context7 验证：iOS 形状通过 layer.isVisible 控制显隐，标注通过 addAnnotation/removeAnnotation 控制
+export function showOverlay(id: number): void {
+    const entry = overlayMap.get(id)
+    if (entry == null) return
+    const ref = entry.nativeRef
+    if (ref == null || entry.isVisible) return
+    if (entry.type == 'marker' || entry.type == 'label') {
+        // 重新添加标注
+        mapView?.addAnnotation(ref as MLNPointAnnotation)
+    } else {
+        ref.layer.isVisible = true
+    }
+    entry.isVisible = true
+}
+
+export function hideOverlay(id: number): void {
+    const entry = overlayMap.get(id)
+    if (entry == null) return
+    const ref = entry.nativeRef
+    if (ref == null || !entry.isVisible) return
+    if (entry.type == 'marker' || entry.type == 'label') {
+        // 从地图移除标注但保留引用
+        mapView?.removeAnnotation(ref as MLNPointAnnotation)
+    } else {
+        ref.layer.isVisible = false
+    }
+    entry.isVisible = false
+}
+
+// ══════════════════════════════════════════════
+// 标记点击事件
+// ══════════════════════════════════════════════
+
+// context7 验证：iOS 使用 MLNMapViewDelegate.didSelectAnnotation 实现标记点击
+// 回调已在 TDTMapDelegate 类中注册，此处仅存储回调引用
+@UTSJS.keepAlive
+export function setMarkerClickCallback(callback: MarkerClickCallback): void {
+    markerClickCallback = callback
+}
+
+// ══════════════════════════════════════════════
+// 地图工具
+// ══════════════════════════════════════════════
+
+// context7 验证：iOS 通过 setNeedsLayout + layoutIfNeeded 刷新地图容器布局
+export function checkResize(): void {
+    if (mapView != null) {
+        mapView.setNeedsLayout()
+        mapView.layoutIfNeeded()
+    }
+}
+
+// context7 验证：iOS 通过 convertPoint + setCenterCoordinate 实现像素级平移
+export function planBy(x: number, y: number): void {
+    if (mapView == null) return
+    const centerPoint = mapView.center
+    // 计算目标屏幕点（CGPoint 在 UTS 中用对象字面量表示）
+    const targetPoint = { x: centerPoint.x + x, y: centerPoint.y + y }
+    const newCoord = mapView.convertPoint(targetPoint, toCoordinateFromView: mapView)
+    mapView.setCenterCoordinate(newCoord, true)
+}
+
+// context7 验证：MLNCoordinateBoundsMake + setVisibleCoordinateBounds 适应坐标点数组
+export function setViewport(points: Array<MapClickDetail>): void {
+    if (mapView == null || points.length == 0) return
+    let minLat = points[0].lat, maxLat = points[0].lat
+    let minLng = points[0].lng, maxLng = points[0].lng
+    for (let i = 1; i < points.length; i++) {
+        if (points[i].lat < minLat) minLat = points[i].lat
+        if (points[i].lat > maxLat) maxLat = points[i].lat
+        if (points[i].lng < minLng) minLng = points[i].lng
+        if (points[i].lng > maxLng) maxLng = points[i].lng
+    }
+    const sw = CLLocationCoordinate2DMake(minLat, minLng)
+    const ne = CLLocationCoordinate2DMake(maxLat, maxLng)
+    const bounds = MLNCoordinateBoundsMake(sw, ne)
+    const edgePadding = new UIEdgeInsets(50, 50, 50, 50)
+    mapView.setVisibleCoordinateBounds(bounds, edgePadding, true)
+}
+
+// context7 验证：MLNMapView.bounds.size 返回容器像素尺寸
+export function getSize(): MapSizeDetail {
+    if (mapView != null) {
+        const bounds = mapView.bounds
+        return { width: bounds.size.width, height: bounds.size.height }
+    }
+    return { width: 0, height: 0 }
+}
+
+// ══════════════════════════════════════════════
+// 信息计算（纯数学，三端通用）
+// ══════════════════════════════════════════════
+
+// Haversine 公式计算两点间距离（米）
+const HAV_EARTH_RADIUS = 6371000.0
+
+function toRadians(deg: number): number {
+    return deg * Math.PI / 180.0
+}
+
+export function getDistance(start: MapClickDetail, end: MapClickDetail): number {
+    const dLat = toRadians(end.lat - start.lat)
+    const dLng = toRadians(end.lng - start.lng)
+    const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+        Math.cos(toRadians(start.lat)) * Math.cos(toRadians(end.lat)) *
+        Math.sin(dLng / 2) * Math.sin(dLng / 2)
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+    return HAV_EARTH_RADIUS * c
+}
+
+// 计算最佳视野：根据坐标点数组返回 center 和 zoom
+export function getViewport(points: Array<MapClickDetail>): MapViewportDetail {
+    if (points.length == 0) {
+        return { center: { lat: 0, lng: 0 }, zoom: 10 }
+    }
+    let minLat = points[0].lat, maxLat = points[0].lat
+    let minLng = points[0].lng, maxLng = points[0].lng
+    for (let i = 1; i < points.length; i++) {
+        if (points[i].lat < minLat) minLat = points[i].lat
+        if (points[i].lat > maxLat) maxLat = points[i].lat
+        if (points[i].lng < minLng) minLng = points[i].lng
+        if (points[i].lng > maxLng) maxLng = points[i].lng
+    }
+    const centerLat = (minLat + maxLat) / 2
+    const centerLng = (minLng + maxLng) / 2
+    const latSpan = maxLat - minLat
+    const lngSpan = maxLng - minLng
+    const maxSpan = Math.max(latSpan, lngSpan)
+    let zoom = Math.log(360 / maxSpan) / Math.log(2)
+    if (zoom < 1) zoom = 1
+    if (zoom > 20) zoom = 20
+    return { center: { lat: centerLat, lng: centerLng }, zoom: zoom }
+}
+
+// 天地图采用 CGCS2000 坐标系，约等于 WGS84
+export function getCode(): string {
+    return 'EPSG:4326'
+}
+
+// ══════════════════════════════════════════════
+// 天地图 Web API（搜索/地理编码）
+// ══════════════════════════════════════════════
+// 上下文7 验证：天地图 geocoder API
+// 地理编码：https://api.tianditu.gov.cn/geocoder?ds={"keyWord":"..."}&tk=KEY
+// 逆地理编码：https://api.tianditu.gov.cn/geocoder?postStr={'lon':...,'lat':...,'ver':1}&type=geocode&tk=KEY
+// 搜索 v2（地名搜索2.0）：https://api.tianditu.gov.cn/v2/search?postStr={...}&type=query&tk=KEY
+// context7 验证：天地图官方声明同时支持 HTTP 和 HTTPS，iOS ATS 也推荐 HTTPS
+
+const TDT_API_BASE = 'https://api.tianditu.gov.cn'
+
+function tiandituHttpRequest(urlStr: string, callback: GeocodeCallback): void {
+    try {
+        const url = NSURL.URLWithString(urlStr)
+        if (url == null) {
+            callback({ status: '404', msg: 'Invalid URL' } as UTSJSONObject)
+            return
+        }
+        // context7 验证：使用 NSString.stringWithContentsOfURL 同步获取 HTTP 响应（4 = NSUTF8StringEncoding）
+        const jsonStr = NSString.stringWithContentsOfURL(url, 4, null) as NSString | null
+        if (jsonStr == null) {
+            callback({ status: '404', msg: 'Network error' } as UTSJSONObject)
+            return
+        }
+        // v1.5.4: JSON.parse 对非法 JSON 返回 null（如接口返回 HTML 错误页），直接 as 会抛崩溃
+        const parsed = JSON.parse(jsonStr as string)
+        if (parsed == null) {
+            callback({ status: '404', msg: 'Invalid JSON response' } as UTSJSONObject)
+            return
+        }
+        callback(parsed as UTSJSONObject)
+    } catch (e: any) {
+        console.error("TDTMap: HTTP 请求失败: " + (e.message ?? e))
+        callback({ status: '404', msg: e.message ?? 'Network error' } as UTSJSONObject)
+    }
+}
+
+// URL 编码辅助函数（iOS 端无 java.net.URLEncoder，使用 NSString 的 percent 编码）
+function urlEncode(str: string): string {
+    const nsStr = NSString.stringWithString(str)
+    // NSUTF8StringEncoding = 4
+    const encoded = nsStr.stringByAddingPercentEscapesUsingEncoding(4) as NSString | null
+    if (encoded != null) return encoded as string
+    return str
+}
+
+@UTSJS.keepAlive
+export function geocode_getLocation(lnglat: MapClickDetail, callback: GeocodeCallback): void {
+    const key = currentApiKey
+    if (key.length == 0) {
+        callback({ status: '1', msg: 'No API Key' } as UTSJSONObject)
+        return
+    }
+    const postStr = "{'lon':" + lnglat.lng.toString() + ",'lat':" + lnglat.lat.toString() + ",'ver':1}"
+    const urlStr = TDT_API_BASE + '/geocoder?postStr=' + urlEncode(postStr) + '&type=geocode&tk=' + key
+    tiandituHttpRequest(urlStr, callback)
+}
+
+@UTSJS.keepAlive
+export function geocode_getPoint(address: string, callback: GeocodeCallback): void {
+    const key = currentApiKey
+    if (key.length == 0) {
+        callback({ status: '1', msg: 'No API Key' } as UTSJSONObject)
+        return
+    }
+    const postStr = '{"keyWord":"' + address + '"}'
+    const urlStr = TDT_API_BASE + '/geocoder?ds=' + urlEncode(postStr) + '&tk=' + key
+    tiandituHttpRequest(urlStr, callback)
+}
+
+function buildSearchUrl(params: SearchOptions): string {
+    const key = currentApiKey
+    // v1.5.4: 天地图老 /search 接口已下线（404 非 JSON 响应导致解析崩溃），
+    // 改用官方「地名搜索2.0」/v2/search（context7 实测验证）：
+    // queryType 必填且仅 12（行政区划搜索）可用；specify 必填（行政区国标码，默认 156000000=中国）；
+    // level/mapBound/queryRadius/pointLonlat 等 v1 参数 v2 不再支持，不再拼入 URL
+    const specify = params.specifyAdminCode != null && params.specifyAdminCode.length > 0 ? params.specifyAdminCode : '156000000'
+    let postJson = '{"keyWord":"' + params.keyWord + '","queryType":"12","specify":"' + specify + '"'
+    if (params.start != null && params.start.length > 0) {
+        postJson += ',"start":"' + params.start + '"'
+    }
+    if (params.count != null && params.count.length > 0) {
+        postJson += ',"count":"' + params.count + '"'
+    }
+    postJson += '}'
+    return TDT_API_BASE + '/v2/search?postStr=' + urlEncode(postJson) + '&type=query&tk=' + key
+}
+
+@UTSJS.keepAlive
+export function search(params: SearchOptions, callback: GeocodeCallback): void {
+    if (currentApiKey.length == 0) {
+        callback({ status: '1', msg: 'No API Key' } as UTSJSONObject)
+        return
+    }
+    // v1.5.5: 清理死代码——buildSearchUrl 已硬编码 queryType=12，v1 遗留的 queryType 兜底赋值不再生效
+    tiandituHttpRequest(buildSearchUrl(params), callback)
+}
+
+@UTSJS.keepAlive
+export function searchInBounds(params: SearchOptions, callback: GeocodeCallback): void {
+    if (currentApiKey.length == 0) {
+        callback({ status: '1', msg: 'No API Key' } as UTSJSONObject)
+        return
+    }
+    tiandituHttpRequest(buildSearchUrl(params), callback)
+}
+
+@UTSJS.keepAlive
+export function searchNearby(params: SearchOptions, callback: GeocodeCallback): void {
+    if (currentApiKey.length == 0) {
+        callback({ status: '1', msg: 'No API Key' } as UTSJSONObject)
+        return
+    }
+    tiandituHttpRequest(buildSearchUrl(params), callback)
+}
+
+// ══════════════════════════════════════════════
+// v1.3.0 新增：定位
+// ══════════════════════════════════════════════
+
+// context7 验证：MLNMapView.showsUserLocation 为 BOOL 属性，设为 true 后 MapLibre 自动请求定位权限并显示蓝点
+let userLocationShown: boolean = false
+
+export function showUserLocation(enabled: boolean): void {
+    if (mapView == null) {
+        if (onErrorCallback != null) {
+            onErrorCallback({ code: 4, message: "地图未初始化，无法显示定位" })
+        }
+        return
+    }
+    userLocationShown = enabled
+    mapView.showsUserLocation = enabled
+}
+
+// context7 验证：iOS CLLocationManager 可获取 GPS 位置，startUpdatingLocation 异步回调
+let locationManager: CLLocationManager | null = null
+let locationCallback: ((detail: MapClickDetail) => void) | null = null
+let locationErrorCallback: ((err: MapErrorDetail) => void) | null = null
+let locationTimer: any | null = null  // NSTimer 引用，用于 destroyMap 时提前 invalidate
+
+@UTSJS.keepAlive
+export function getUserLocation(callback: (detail: MapClickDetail) => void, onError?: (err: MapErrorDetail) => void): void {
+    locationCallback = callback
+    locationErrorCallback = onError ?? null
+    
+    if (locationManager == null) {
+        locationManager = new CLLocationManager()
+    }
+    
+    const lm = locationManager!
+    // 先尝试获取最后已知位置（同步、快速，无需等待）
+    const lastLoc = lm.location
+    if (lastLoc != null) {
+        const coord = lastLoc.coordinate
+        callback({ lat: coord.latitude, lng: coord.longitude })
+        return
+    }
+    
+    // 无缓存位置：请求授权并启动定位
+    // context7 验证：iOS 8+ 必须先调用 requestWhenInUseAuthorization 再 startUpdatingLocation
+    // 否则定位服务静默失败，lm.location 永远为 null
+    try {
+        lm.requestWhenInUseAuthorization()
+        lm.startUpdatingLocation()
+        let attempts = 0
+        const maxAttempts = 25  // 200ms × 25 = 5s
+        // context7 验证：NSTimer block API 需要 iOS 10+，uni-app x iOS 最低支持 14.0
+        locationTimer = NSTimer.scheduledTimerWithTimeInterval(0.2, true, (timer: any) => {
+            attempts++
+            const loc = lm.location
+            if (loc != null) {
+                lm.stopUpdatingLocation()
+                timer.invalidate()
+                locationTimer = null
+                const coord = loc.coordinate
+                if (locationCallback != null) {
+                    locationCallback({ lat: coord.latitude, lng: coord.longitude })
+                }
+            } else if (attempts >= maxAttempts) {
+                lm.stopUpdatingLocation()
+                timer.invalidate()
+                locationTimer = null
+                const errCb = locationErrorCallback ?? onErrorCallback
+                if (errCb != null) {
+                    errCb({ code: 4, message: "获取定位超时（5s），请检查定位权限" })
+                }
+            }
+        })
+    } catch (e: any) {
+        console.error("TDTMap: getUserLocation 失败: " + (e.message ?? String(e)))
+        if (onError != null) {
+            onError({ code: 4, message: "获取定位失败: " + (e.message ?? String(e)) })
+        }
+        lm.stopUpdatingLocation()
+    }
+}
+
+// ══════════════════════════════════════════════
+// v1.3.0 新增：信息窗口
+// ══════════════════════════════════════════════
+
+// context7 验证：iOS MLNMapView.selectAnnotation 显示标注气泡（callout），deselectAnnotation 隐藏
+// 注意：标注需设置 title/subtitle 才会显示气泡内容
+export function showMarkerInfo(id: number): void {
+    const entry = overlayMap.get(id)
+    if (entry == null || mapView == null) return
+    if (entry.type == 'marker' || entry.type == 'label') {
+        const annotation = entry.nativeRef as MLNPointAnnotation
+        try {
+            mapView.selectAnnotation(annotation, true)
+        } catch (e: any) {
+            console.error("TDTMap: showMarkerInfo 失败: " + (e.message ?? String(e)))
+        }
+    }
+}
+
+export function hideMarkerInfo(id: number): void {
+    const entry = overlayMap.get(id)
+    if (entry == null || mapView == null) return
+    if (entry.type == 'marker' || entry.type == 'label') {
+        const annotation = entry.nativeRef as MLNPointAnnotation
+        try {
+            mapView.deselectAnnotation(annotation, true)
+        } catch (e: any) {
+            console.error("TDTMap: hideMarkerInfo 失败: " + (e.message ?? String(e)))
+        }
+    }
+}
+
+// ══════════════════════════════════════════════
+// v1.3.0 新增：自定义瓦片图层
+// ══════════════════════════════════════════════
+
+// context7 验证：MLNRasterTileSource 支持 URL 数组或 TileJSON，MLNRasterStyleLayer 绑定到 source
+type CustomTileEntry = { source: MLNRasterTileSource, layer: MLNRasterStyleLayer }
+let customTileSources = new Map<string, CustomTileEntry>()
+
+export function addCustomTileLayer(id: string, tileUrl: string): void {
+    if (mapView == null || mapView.style == null) {
+        if (onErrorCallback != null) {
+            onErrorCallback({ code: 4, message: "样式未加载，无法添加瓦片图层" })
+        }
+        return
+    }
+    // 若已存在同 ID 图层，先移除旧层
+    removeCustomTileLayer(id)
+    try {
+        const tileURLs: Array<string> = [tileUrl]
+        const source = new MLNRasterTileSource(id, tileURLs, null)
+        mapView.style?.addSource(source)
+        const layer = new MLNRasterStyleLayer(id + "-layer", source)
+        layer.minimumZoomLevel = 1
+        layer.maximumZoomLevel = 18
+        mapView.style?.addLayer(layer)
+        customTileSources.set(id, { source: source, layer: layer })
+    } catch (e: any) {
+        console.error("TDTMap: addCustomTileLayer 失败: " + (e.message ?? String(e)))
+        if (onErrorCallback != null) {
+            onErrorCallback({ code: 4, message: "添加瓦片图层失败: " + (e.message ?? String(e)) })
+        }
+    }
+}
+
+export function removeCustomTileLayer(id: string): void {
+    const entry = customTileSources.get(id)
+    if (entry == null) return
+    if (mapView?.style != null) {
+        try {
+            mapView.style?.removeLayer(entry.layer)
+            mapView.style?.removeSource(entry.source)
+        } catch (e: any) {
+            console.error("TDTMap: removeCustomTileLayer 失败: " + (e.message ?? String(e)))
+        }
+    }
+    customTileSources.delete(id)
+}
+
+// ══════════════════════════════════════════════
+// v1.4.0 新增：地图交互增强
+// ══════════════════════════════════════════════
+
+// context7 验证：setMapLongClickCallback 存储回调（实际监听在 initMap 中注册）
+@UTSJS.keepAlive
+export function setMapLongClickCallback(callback: MapLongClickCallback): void {
+    mapLongClickCallback = callback
+}
+
+// context7 验证：MLNMapView.direction 属性设置/读取 bearing（0=正北，顺时针）
+export function setBearing(bearing: number): void {
+    if (mapView != null) {
+        mapView.direction = bearing
+    }
+}
+
+// context7 验证：MLNMapCamera.pitch 设置 tilt，需通过新建 MLNMapCamera 修改
+export function setTilt(tilt: number): void {
+    if (mapView == null) return
+    const curCam = mapView.camera
+    if (curCam == null) return
+    // context7 验证：MLNMapCamera 构造 initWithLookingAtCenterCoordinate:altitude:pitch:heading:
+    const newCam = new MLNMapCamera(curCam.centerCoordinate, curCam.altitude, tilt, curCam.heading)
+    mapView.setCamera(newCam, true)
+}
+
+// context7 验证：MLNMapView.direction 读取 bearing
+export function getBearing(): number {
+    if (mapView != null) {
+        return mapView.direction
+    }
+    return 0
+}
+
+// context7 验证：MLNMapView.camera.pitch 读取 tilt
+export function getTilt(): number {
+    if (mapView != null) {
+        const cam = mapView.camera
+        if (cam != null) return cam.pitch
+    }
+    return 0
+}
+
+// context7 验证：MLNMapView.rotateEnabled 控制双指旋转手势
+export function enableRotate(enabled: boolean): void {
+    if (mapView != null) {
+        mapView.rotateEnabled = enabled
+    }
+}
+
+// context7 验证：MLNMapView.pitchEnabled 控制双指倾斜手势
+export function enableTilt(enabled: boolean): void {
+    if (mapView != null) {
+        mapView.pitchEnabled = enabled
+    }
+}
+
+// context7 验证：setCameraChangeCallback 存储回调（实际监听在 TDTMapDelegate 中实现）
+@UTSJS.keepAlive
+export function setCameraChangeCallback(callback: CameraChangeCallback): void {
+    cameraChangeCallback = callback
+}

@@ -1,0 +1,1482 @@
+import { map, mapCommon } from '@kit.MapKit'
+import { AsyncCallback } from '@kit.BasicServicesKit'
+import { BuilderNode } from '@kit.ArkUI'
+import { http } from '@kit.NetworkKit'
+import { geoLocationManager } from '@kit.LocationKit'
+// 导入混编实现的声明式 UI 构建函数
+import { buildMapComponent, TDTMapBuilderOptions } from './builder.ets'
+import {
+    TDMapOptions, MapClickDetail, MapBoundsDetail, MapErrorDetail, MapSizeDetail, MapViewportDetail,
+    MapClickCallback, MapReadyCallback, MapErrorCallback, MarkerClickCallback, GeocodeCallback, SearchOptions,
+    MapLongClickCallback, CameraChangeCallback
+} from '../interface.uts'
+
+// ⚠️ 天地图 Key 类型说明（自新系统升级后严格区分，混用会导致瓦片不显示）:
+//   - "浏览器端" key：校验 Referer 头 + 域名白名单 → 原生 App 不发送 Referer → 被拒
+//   - "服务端" key：校验 IP 白名单（留空则不限制）→ 三端通用推荐
+//   - "Android平台" key：仅 Android 可用
+//   🔧 鸿蒙/iOS/Android 统一使用"服务端"类型 key（IP 白名单留空）
+
+let mapController: map.MapComponentController | null = null
+let builderNode: BuilderNode<[TDTMapBuilderOptions]> | null = null
+let tileOverlay: map.TileOverlay | null = null
+let labelOverlay: map.TileOverlay | null = null
+let onClickCallback: MapClickCallback | null = null
+let onReadyCallback: MapReadyCallback | null = null
+let onErrorCallback: MapErrorCallback | null = null
+let currentApiKey: string = ''
+let currentMapType: string = 'vec'
+
+// Camera state tracking（鸿蒙 MapKit 不提供 getCameraPosition，需手动跟踪）
+let currentLat: number = 0
+let currentLng: number = 0
+let currentZoom: number = 0
+let currentBearing: number = 0
+let currentTilt: number = 0
+
+// Polygon storage
+let polygons: Array<any> = []
+let polylines: Array<any> = []
+let circles: Array<any> = []
+let rectangles: Array<any> = []
+// Marker tracking（Android/iOS 模式：逐个管理，避免 mapController.clear() 连带清除非标记覆盖物）
+let markerList: Array<any> = []
+
+// ── 覆盖物 ID 追踪系统 ──
+// 为每个添加的覆盖物分配唯一 ID，支持 removeOverlay/showOverlay/hideOverlay 单个操作
+let overlayIdCounter: number = 0
+let overlayMap = new Map<number, OverlayEntry>()
+
+type OverlayEntry = {
+    id: number
+    type: string  // 'marker' | 'polygon' | 'polyline' | 'circle' | 'rectangle' | 'label'
+    nativeRef: any  // 鸿蒙原生覆盖物对象
+    isVisible: boolean
+}
+
+let markerClickCallback: MarkerClickCallback | null = null
+let mapLongClickCallback: MapLongClickCallback | null = null
+let cameraChangeCallback: CameraChangeCallback | null = null
+
+// 分配 overlay ID 并存入追踪表
+function allocateOverlayId(type: string, nativeRef: any): number {
+    overlayIdCounter++
+    const id = overlayIdCounter
+    overlayMap.set(id, { id: id, type: type, nativeRef: nativeRef, isVisible: true })
+    return id
+}
+
+// 从 overlayMap 中清除指定类型的所有条目
+function clearOverlayType(type: string): void {
+    const keysToRemove: Array<number> = []
+    overlayMap.forEach((entry: OverlayEntry, key: number) => {
+        if (entry.type == type) {
+            keysToRemove.push(key)
+        }
+    })
+    for (let i = 0; i < keysToRemove.length; i++) {
+        overlayMap.delete(keysToRemove[i])
+    }
+}
+
+// 天地图 DataServer XYZ 格式瓦片 URL
+// 鸿蒙 MapKit 官方约束：tileUrl 必须以 http/https 开头且包含 {x}、{y}、{z} 占位符。
+// 注意：MapKit TileOverlay 单图层只允许一个 URL，且最多 10 个图层，无法像 Android/iOS 那样并行多子域名加载。
+// 鸿蒙端性能依赖 MapKit 自身 HTTP 连接池，实测通常够用。
+const TDT_TILE_URLS: Record<string, string> = {
+    vec: 'https://t0.tianditu.gov.cn/DataServer?T=vec_w&x={x}&y={y}&l={z}&tk=',
+    cva: 'https://t0.tianditu.gov.cn/DataServer?T=cva_w&x={x}&y={y}&l={z}&tk=',
+    img: 'https://t0.tianditu.gov.cn/DataServer?T=img_w&x={x}&y={y}&l={z}&tk=',
+    cia: 'https://t0.tianditu.gov.cn/DataServer?T=cia_w&x={x}&y={y}&l={z}&tk=',
+    ter: 'https://t0.tianditu.gov.cn/DataServer?T=ter_w&x={x}&y={y}&l={z}&tk=',
+    cta: 'https://t0.tianditu.gov.cn/DataServer?T=cta_w&x={x}&y={y}&l={z}&tk='
+}
+
+// 地图类型与图层映射
+const TYPE_LAYER_MAP: Record<string, { base: string, label: string }> = {
+    vec: { base: 'vec', label: 'cva' },
+    img: { base: 'img', label: 'cia' },
+    ter: { base: 'ter', label: 'cta' }
+}
+
+// 预创建的所有瓦片图层 [vec:0, img:1, ter:2]
+// 存储所有图层引用以便切换时直接 toggle，无需移除重建
+let allTileOverlays: Array<{ base: map.TileOverlay | null, label: map.TileOverlay | null }> = [
+    { base: null, label: null },
+    { base: null, label: null },
+    { base: null, label: null }
+]
+
+// 辅助函数：根据地图类型获取数组索引
+function getTypeIndex(type: string): number {
+    switch (type) {
+        case 'vec': return 0
+        case 'img': return 1
+        case 'ter': return 2
+        default: return 0
+    }
+}
+
+// 辅助函数：将十六进制颜色字符串转换为 ARGB 数值
+function parseColorHex(hexColor: string): number {
+    let hex = hexColor
+    if (hex.startsWith('#')) {
+        hex = hex.substring(1)
+    }
+    if (hex.length == 6) {
+        hex = 'FF' + hex
+    }
+    return Number('0x' + hex)
+}
+
+// context7 验证：addTileOverlay 返回 TileOverlay（同步），与 addMarker/addPolygon（返回 Promise）不同。
+// await 对同步返回值安全透传，此处使用 await 仅为与代码风格保持一致。
+async function createTileLayerPair(mapType: string, apiKey: string): Promise<{ base: map.TileOverlay | null, label: map.TileOverlay | null }> {
+    const layers = TYPE_LAYER_MAP[mapType]
+    if (layers == null) {
+        return { base: null, label: null }
+    }
+
+    // TileOverlayParams 自 5.0.3(15) 支持；TileOverlayOptions 及 diskCacheEnabled/diskCacheSize
+    // 磁盘缓存参数需 6.0.0(20)+，为兼容低版本此处不使用
+    let baseOptions: mapCommon.TileOverlayParams = {
+        tileUrl: TDT_TILE_URLS[layers.base] + apiKey,
+        transparency: 0,
+        fadeIn: true
+    }
+    let baseOverlay = await mapController?.addTileOverlay(baseOptions) ?? null
+
+    let labelOptions: mapCommon.TileOverlayParams = {
+        tileUrl: TDT_TILE_URLS[layers.label] + apiKey,
+        transparency: 0,
+        fadeIn: true
+    }
+    let labelOverlay = await mapController?.addTileOverlay(labelOptions) ?? null
+
+    return { base: baseOverlay, label: labelOverlay }
+}
+
+// 预创建所有 3 类地图瓦片图层对，非活跃类型立即移除（后续切换时重建）
+async function preCreateAllTileLayers(apiKey: string, activeType: string): Promise<void> {
+    const types = ['vec', 'img', 'ter']
+    for (let i = 0; i < 3; i++) {
+        const type = types[i]
+        try {
+            const pair = await createTileLayerPair(type, apiKey)
+            allTileOverlays[i] = pair
+            if (type == activeType) {
+                tileOverlay = pair.base
+                labelOverlay = pair.label
+            } else {
+                pair.base?.remove()
+                pair.label?.remove()
+                allTileOverlays[i] = { base: null, label: null }
+            }
+        } catch (e: any) {
+            console.error("TDTMap: Failed to pre-create tile layer for " + type, e.message ?? e)
+            if (onErrorCallback != null) {
+                onErrorCallback({ code: 3, message: 'Tile layer pre-creation failed for ' + type + ': ' + (e.message ?? String(e)) })
+            }
+        }
+    }
+}
+
+@UTSJS.keepAlive
+export function initMap(
+    container: UniNativeViewElement,
+    options: TDMapOptions,
+    onClick: MapClickCallback,
+    onReady: MapReadyCallback,
+    onError: MapErrorCallback
+): void {
+    onClickCallback = onClick
+    onReadyCallback = onReady
+    onErrorCallback = onError
+    currentApiKey = options.apiKey
+    currentMapType = options.mapType
+
+    console.log("TDTMap: initMap key=" + (options.apiKey.length > 0 ? "***" : "空") + " type=" + options.mapType)
+
+    // 诊断日志：输出瓦片 URL（复制到浏览器验证 key 是否有效）
+    const diagUrl = TDT_TILE_URLS['vec'] + options.apiKey
+    console.log("TDTMap: 诊断URL(浏览器验证)= " + diagUrl.replace("{x}", "537").replace("{y}", "389").replace("{z}", "10"))
+
+    // 记录初始相机状态
+    currentLat = options.latitude
+    currentLng = options.longitude
+    currentZoom = options.zoom
+    currentBearing = 0
+    currentTilt = 0
+
+    // 检查 API Key
+    if (options.apiKey == null || options.apiKey.length == 0) {
+        if (onErrorCallback != null) {
+            onErrorCallback({ code: 1, message: 'API Key is empty' })
+        }
+        return
+    }
+
+    // 鸿蒙官方模式：MapComponent 通过 WrappedBuilder 绑定进 native-view，
+    // 控制器通过 MapComponent 构造回调 mapCallback 获取；初始视角通过 mapOptions 设置
+    // v1.6.0: 控件显隐 —— context7 验证华为官方文档（developer.huawei.com/consumer/cn/doc/
+    // harmonyos-guides/map-controls-and-interaction）：zoomControlsEnabled 默认 true、
+    // scaleControlsEnabled 默认 false，均需按插件 props（默认 true）显式设置
+    const mapOptions: mapCommon.MapOptions = {
+        position: {
+            target: { latitude: options.latitude, longitude: options.longitude },
+            zoom: options.zoom
+        },
+        zoomControlsEnabled: options.showZoomControl !== false,
+        scaleControlsEnabled: options.showScaleControl !== false
+    }
+    const mapCallback: AsyncCallback<map.MapComponentController> = (err, controller) => {
+        if (err != null) {
+            console.error("TDTMap: MapKit initialization failed", err.message)
+            if (onErrorCallback != null) {
+                onErrorCallback({ code: 4, message: 'MapKit controller init failed: ' + err.message })
+            }
+            return
+        }
+        mapController = controller
+
+        // v1.6.0: 华为 logo 不可移除/遮挡（官方政策），移位右上角避让左下角 uvue 版权条；
+        // 审图号为华为地图内容与天地图无关，显式关闭（setApproveNumberEnabled 自 6.1.0(23) 支持），
+        // 版权由 uvue 版权条统一承担
+        // 来源：developer.huawei.com/consumer/cn/doc/harmonyos-guides/map-controls-and-interaction
+        // 低版本 MapKit 方法不存在会抛异常，此处 try/catch 降级——控件配置失败不应阻断瓦片创建
+        try {
+            controller.setLogoAlignment(mapCommon.LogoAlignment.TOP_END)
+            controller.setApproveNumberEnabled(false)
+        } catch (e: any) {
+            console.warn("TDTMap: 控件配置失败（低版本 MapKit 不支持）", e.message ?? String(e))
+        }
+
+        // 预创建所有 3 类瓦片图层对（异步，addTileOverlay 返回 Promise）
+        // 注意：HarmonyOS AsyncCallback 不能标记为 async，使用 .then() 处理
+        preCreateAllTileLayers(options.apiKey, options.mapType).then(() => {
+            // 地图点击事件 — HarmonyOS MapKit LatLng 使用 latitude/longitude
+            const evtMgr = controller.getEventManager()
+            evtMgr.on('mapClick', (latLng: mapCommon.LatLng) => {
+                if (onClickCallback != null) {
+                    onClickCallback({
+                        lat: latLng.latitude,
+                        lng: latLng.longitude
+                    })
+                }
+            })
+
+            // 标记点击事件 — HarmonyOS MapKit markerClick 事件
+            evtMgr.on('markerClick', (marker: any) => {
+                const cb = markerClickCallback
+                if (cb != null) {
+                    const position = marker.getPosition()
+                    if (position != null) {
+                        cb({ lat: position.latitude, lng: position.longitude })
+                    }
+                }
+            })
+
+            // v1.4.0: 长按事件 — context7 验证：HarmonyOS MapKit mapLongClick 事件
+            evtMgr.on('mapLongClick', (latLng: mapCommon.LatLng) => {
+                const cb = mapLongClickCallback
+                if (cb != null) {
+                    cb({ lat: latLng.latitude, lng: latLng.longitude })
+                }
+            })
+
+            // v1.4.0: 相机变化事件 — WebSearch 验证：华为官方 MapEventManager 无 cameraChange 事件
+            // 实际存在的事件为：cameraMoveStart / cameraMove / cameraIdle（均为 Callback<void>）
+            // cameraMove：相机移动中持续触发，静默更新状态跟踪变量（不回调用户，避免 60fps 洪水）
+            // cameraIdle：相机停止时触发，执行用户 cameraChangeCallback
+            // 参考：developer.huawei.com/consumer/cn/doc/harmonyos-guides/map-listening-V5
+            evtMgr.on('cameraMove', () => {
+                const camPos = controller.getCameraPosition()
+                if (camPos != null) {
+                    const tgt = camPos.target
+                    if (tgt != null) {
+                        currentLat = tgt.latitude
+                        currentLng = tgt.longitude
+                    }
+                    if (camPos.bearing != null) currentBearing = camPos.bearing
+                    if (camPos.tilt != null) currentTilt = camPos.tilt
+                    if (camPos.zoom != null) currentZoom = camPos.zoom
+                }
+            })
+            evtMgr.on('cameraIdle', () => {
+                const cb = cameraChangeCallback
+                if (cb != null) {
+                    cb({ lat: currentLat, lng: currentLng })
+                }
+            })
+
+            if (onReadyCallback != null) {
+                onReadyCallback()
+            }
+        })
+    }
+
+    // 将声明式组件绑定到 native-view（uni-app x 官方 API）
+    builderNode = container.bindHarmonyWrappedBuilder(
+        wrapBuilder<[TDTMapBuilderOptions]>(buildMapComponent),
+        { mapOptions: mapOptions, mapCallback: mapCallback }
+    )
+}
+
+// context7 验证：addTileOverlay (createTileLayerPair) 返回 Promise，fire-and-forget 重建不阻塞返回
+export function switchMapType(mapType: string): void {
+    if (mapController == null) return
+    const oldType = currentMapType
+    currentMapType = mapType
+
+    // 移除旧活跃图层
+    const oldIndex = getTypeIndex(oldType)
+    allTileOverlays[oldIndex].base?.remove()
+    allTileOverlays[oldIndex].label?.remove()
+    allTileOverlays[oldIndex] = { base: null, label: null }
+
+    // 重建目标类型图层（fire-and-forget）
+    const layers = TYPE_LAYER_MAP[mapType]
+    if (layers == null) return
+    addTiandituTileLayer(mapType, currentApiKey).then(() => {
+        const newIndex = getTypeIndex(mapType)
+        allTileOverlays[newIndex] = { base: tileOverlay, label: labelOverlay }
+    }).catch((e: any) => {
+        console.error("TDTMap: switchMapType 瓦片切换失败: " + (e.message ?? String(e)))
+        if (onErrorCallback != null) {
+            onErrorCallback({ code: 3, message: 'Tile layer switch failed for ' + mapType + ': ' + (e.message ?? String(e)) })
+        }
+    })
+}
+
+async function addTiandituTileLayer(mapType: string, apiKey: string): Promise<void> {
+    try {
+        const pair = await createTileLayerPair(mapType, apiKey)
+        tileOverlay = pair.base
+        labelOverlay = pair.label
+    } catch (e: any) {
+        console.error("TDTMap: Failed to add tile layer", e.message ?? e)
+        if (onErrorCallback != null) {
+            onErrorCallback({ code: 3, message: 'Tile layer loading failed: ' + (e.message ?? String(e)) })
+        }
+    }
+}
+
+export function setCenter(lat: number, lng: number): void {
+    if (mapController != null) {
+        currentLat = lat
+        currentLng = lng
+        // context7 验证：CameraPosition 必须包含 zoom 避免字段缺失时 reset 为默认值
+        mapController.setCameraPosition({
+            target: { latitude: lat, longitude: lng },
+            zoom: currentZoom,
+            bearing: currentBearing,
+            tilt: currentTilt
+        })
+    }
+}
+
+export function setZoom(zoom: number): void {
+    if (mapController != null) {
+        currentZoom = zoom
+        // context7 验证：CameraPosition 必须包含 target 避免字段缺失时重置为 (0,0)
+        mapController.setCameraPosition({
+            target: { latitude: currentLat, longitude: currentLng },
+            zoom: zoom,
+            bearing: currentBearing,
+            tilt: currentTilt
+        })
+    }
+}
+
+export function getCenter(): MapClickDetail {
+    return { lat: currentLat, lng: currentLng }
+}
+
+export function getZoom(): number {
+    return currentZoom
+}
+
+export function fitBounds(minLat: number, minLng: number, maxLat: number, maxLng: number, padding: number): void {
+    if (mapController == null) return
+
+    // 计算边界中心点和合适缩放级别
+    const centerLat = (minLat + maxLat) / 2
+    const centerLng = (minLng + maxLng) / 2
+    const latSpan = maxLat - minLat
+    const lngSpan = maxLng - minLng
+    const maxSpan = Math.max(latSpan, lngSpan)
+
+    let zoom = Math.log(360 / maxSpan) / Math.log(2)
+    if (padding > 0) zoom -= padding / 50
+    if (zoom < 1) zoom = 1
+    if (zoom > 20) zoom = 20
+    zoom = Math.floor(zoom)
+
+    mapController.setCameraPosition({
+        target: { latitude: centerLat, longitude: centerLng },
+        zoom: zoom,
+        bearing: currentBearing,
+        tilt: currentTilt
+    })
+
+    currentLat = centerLat
+    currentLng = centerLng
+    currentZoom = zoom
+}
+
+export function addMarker(lat: number, lng: number, title: string, snippet?: string): number {
+    if (mapController != null) {
+        // 预分配 ID（同步），异步完成后更新 nativeRef
+        overlayIdCounter++
+        const id = overlayIdCounter
+        overlayMap.set(id, { id: id, type: 'marker', nativeRef: null, isVisible: true })
+        // context7 验证：addMarker 返回 Promise 且可能 reject（错误码 401/1002601001），需要错误处理
+        const markerOpts: any = {
+            position: { latitude: lat, longitude: lng },
+            title: title
+        }
+        // v1.3.0: 设置 snippet 以支持信息窗口
+        if (snippet != null && snippet.length > 0) {
+            markerOpts.snippet = snippet
+        }
+        mapController.addMarker(markerOpts).then((marker: any) => {
+            markerList.push(marker)
+            // 更新 nativeRef
+            const entry = overlayMap.get(id)
+            if (entry != null) {
+                entry.nativeRef = marker
+            }
+        }).catch((e: any) => {
+            console.error("TDTMap: addMarker 失败: " + (e.message ?? String(e)))
+            overlayMap.delete(id)
+        })
+        return id
+    }
+    return 0
+}
+
+export function clearMarkers(): void {
+    if (mapController == null) {
+        clearOverlayType('marker')
+        clearOverlayType('label')
+        markerList = []
+        return
+    }
+    // context7 验证：HarmonyOS clear() 会清除所有覆盖物（含多边形/折线/圆），
+    // 改为逐个 remove() 仅清除标记，避免连带清除非标记覆盖物
+    for (let i = 0; i < markerList.length; i++) {
+        markerList[i].remove()
+    }
+    markerList = []
+    clearOverlayType('marker')
+    clearOverlayType('label')
+}
+
+// context7 验证：addPolygon 官方文档标注返回 Promise<MapPolygon>，但接口层要求同步返回 number
+// 采用预分配 ID + .then() 异步填 nativeRef 模式（与 addMarker 一致），确保三端返回类型一致
+// 避免 async 函数导致的 Promise<number> 类型断裂（组件层拿到 Promise 而非 number，overlay ID 追踪失效）
+export function addPolygon(points: Array<MapClickDetail>, color: string, fillColor: string): number {
+    if (mapController == null) return 0
+    // 预分配 ID（同步），异步完成后更新 nativeRef
+    overlayIdCounter++
+    const id = overlayIdCounter
+    overlayMap.set(id, { id: id, type: 'polygon', nativeRef: null, isVisible: true })
+    const latLngs: Array<mapCommon.LatLng> = []
+    for (let i = 0; i < points.length; i++) {
+        latLngs.push({ latitude: points[i].lat, longitude: points[i].lng })
+    }
+    const strokeColorNum = parseColorHex(color)
+    const fillColorNum = parseColorHex(fillColor)
+    mapController.addPolygon({
+        points: latLngs,
+        strokeColor: strokeColorNum,
+        fillColor: fillColorNum
+    }).then((polygon: any) => {
+        if (polygon != null) {
+            polygons.push(polygon)
+            const entry = overlayMap.get(id)
+            if (entry != null) {
+                entry.nativeRef = polygon
+            }
+        }
+    }).catch((e: any) => {
+        console.error("TDTMap: 添加多边形失败: " + (e.message ?? String(e)))
+        overlayMap.delete(id)
+        if (onErrorCallback != null) {
+            onErrorCallback({ code: 4, message: "添加多边形失败: " + (e.message ?? String(e)) })
+        }
+    })
+    return id
+}
+
+export function clearPolygons(): void {
+    if (mapController == null) {
+        clearOverlayType('polygon')
+        polygons = []
+        return
+    }
+    for (let i = 0; i < polygons.length; i++) {
+        polygons[i].remove()
+    }
+    clearOverlayType('polygon')
+    polygons = []
+}
+
+// ==================== 覆盖物：折线 ====================
+
+// context7 验证：addPolyline 返回 Promise<MapPolyline>，改用预分配 ID + .then() 同步返回 number
+export function addPolyline(points: Array<MapClickDetail>, color: string, width: number): number {
+    if (mapController == null || points.length < 2) return 0
+    // 预分配 ID（同步）
+    overlayIdCounter++
+    const id = overlayIdCounter
+    overlayMap.set(id, { id: id, type: 'polyline', nativeRef: null, isVisible: true })
+    const latLngs: Array<mapCommon.LatLng> = []
+    for (let i = 0; i < points.length; i++) {
+        latLngs.push({ latitude: points[i].lat, longitude: points[i].lng })
+    }
+    const colorNum = parseColorHex(color)
+    mapController.addPolyline({
+        points: latLngs,
+        color: colorNum,
+        width: width,
+        visible: true
+    }).then((polyline: any) => {
+        if (polyline != null) {
+            polylines.push(polyline)
+            const entry = overlayMap.get(id)
+            if (entry != null) {
+                entry.nativeRef = polyline
+            }
+        }
+    }).catch((e: any) => {
+        console.error("TDTMap: 添加折线失败: " + (e.message ?? String(e)))
+        overlayMap.delete(id)
+        if (onErrorCallback != null) {
+            onErrorCallback({ code: 4, message: "添加折线失败: " + (e.message ?? String(e)) })
+        }
+    })
+    return id
+}
+
+// ==================== 覆盖物：圆（鸿蒙原生支持） ====================
+
+// context7 验证：addCircle 返回 Promise<MapCircle>，改用预分配 ID + .then() 同步返回 number
+export function addCircle(lat: number, lng: number, radius: number, color: string, fillColor: string): number {
+    if (mapController == null) return 0
+    // 预分配 ID（同步）
+    overlayIdCounter++
+    const id = overlayIdCounter
+    overlayMap.set(id, { id: id, type: 'circle', nativeRef: null, isVisible: true })
+    const strokeColorNum = parseColorHex(color)
+    const fillColorNum = parseColorHex(fillColor)
+    mapController.addCircle({
+        center: { latitude: lat, longitude: lng },
+        radius: radius,
+        strokeColor: strokeColorNum,
+        fillColor: fillColorNum,
+        strokeWidth: 2,
+        visible: true
+    }).then((circle: any) => {
+        if (circle != null) {
+            circles.push(circle)
+            const entry = overlayMap.get(id)
+            if (entry != null) {
+                entry.nativeRef = circle
+            }
+        }
+    }).catch((e: any) => {
+        console.error("TDTMap: 添加圆失败: " + (e.message ?? String(e)))
+        overlayMap.delete(id)
+        if (onErrorCallback != null) {
+            onErrorCallback({ code: 4, message: "添加圆失败: " + (e.message ?? String(e)) })
+        }
+    })
+    return id
+}
+
+// ==================== 覆盖物：矩形 ====================
+
+// context7 验证：addPolygon 返回 Promise<MapPolygon>，改用预分配 ID + .then() 同步返回 number（与 addPolygon 一致）
+export function addRectangle(minLat: number, minLng: number, maxLat: number, maxLng: number, color: string, fillColor: string): number {
+    if (mapController == null) return 0
+    // 预分配 ID（同步），异步完成后更新 nativeRef
+    overlayIdCounter++
+    const id = overlayIdCounter
+    overlayMap.set(id, { id: id, type: 'rectangle', nativeRef: null, isVisible: true })
+    const latLngs: Array<mapCommon.LatLng> = [
+        { latitude: minLat, longitude: minLng },
+        { latitude: maxLat, longitude: minLng },
+        { latitude: maxLat, longitude: maxLng },
+        { latitude: minLat, longitude: maxLng }
+    ]
+    const strokeColorNum = parseColorHex(color)
+    const fillColorNum = parseColorHex(fillColor)
+    mapController.addPolygon({
+        points: latLngs,
+        strokeColor: strokeColorNum,
+        fillColor: fillColorNum
+    }).then((polygon: any) => {
+        if (polygon != null) {
+            rectangles.push(polygon)
+            const entry = overlayMap.get(id)
+            if (entry != null) {
+                entry.nativeRef = polygon
+            }
+        }
+    }).catch((e: any) => {
+        console.error("TDTMap: 添加矩形失败: " + (e.message ?? String(e)))
+        overlayMap.delete(id)
+        if (onErrorCallback != null) {
+            onErrorCallback({ code: 4, message: "添加矩形失败: " + (e.message ?? String(e)) })
+        }
+    })
+    return id
+}
+
+// ==================== 覆盖物：文字标注 ====================
+
+export function addLabel(lat: number, lng: number, text: string): number {
+    if (mapController != null) {
+        // 预分配 ID（同步），异步完成后更新 nativeRef
+        overlayIdCounter++
+        const id = overlayIdCounter
+        overlayMap.set(id, { id: id, type: 'label', nativeRef: null, isVisible: true })
+        // context7 验证：addMarker 可能 reject，统一错误处理
+        mapController.addMarker({
+            position: { latitude: lat, longitude: lng },
+            title: text
+        }).then((marker: any) => {
+            markerList.push(marker)
+            const entry = overlayMap.get(id)
+            if (entry != null) {
+                entry.nativeRef = marker
+            }
+        }).catch((e: any) => {
+            console.error("TDTMap: addLabel 失败: " + (e.message ?? String(e)))
+            overlayMap.delete(id)
+        })
+        return id
+    }
+    return 0
+}
+
+// ==================== 覆盖物：批量标记 ====================
+
+// context7 验证：addMarker 返回 Promise<Marker>，改用预分配 ID + .then() 同步返回 Array<number>
+export function setMarkers(markers: Array<MapClickDetail>): Array<number> {
+    // 逐个移除旧标记（不用 clearMarkers() 的 for 循环是为了内联执行，避免 unnecessary async）
+    if (mapController != null) {
+        for (let i = 0; i < markerList.length; i++) {
+            markerList[i].remove()
+        }
+    }
+    markerList = []
+    clearOverlayType('marker')
+    const ids: Array<number> = []
+    if (mapController == null || markers.length == 0) return ids
+    // 预分配 ID（同步返回），异步完成后更新 nativeRef
+    for (let i = 0; i < markers.length; i++) {
+        const pt = markers[i]
+        overlayIdCounter++
+        const id = overlayIdCounter
+        overlayMap.set(id, { id: id, type: 'marker', nativeRef: null, isVisible: true })
+        ids.push(id)
+        const markerIndex = i  // 捕获循环变量供异步回调使用
+        mapController.addMarker({
+            position: { latitude: pt.lat, longitude: pt.lng }
+        }).then((mk: any) => {
+            markerList.push(mk)
+            const entry = overlayMap.get(id)
+            if (entry != null) {
+                entry.nativeRef = mk
+            }
+        }).catch((e: any) => {
+            console.error("TDTMap: setMarkers[" + markerIndex + "] 失败: " + (e.message ?? String(e)))
+            overlayMap.delete(id)
+        })
+    }
+    return ids
+}
+
+// ==================== 覆盖物：清除全部 ====================
+
+export function clearOverlays(): void {
+    if (mapController == null) {
+        clearOverlayType('marker')
+        clearOverlayType('label')
+        clearOverlayType('polygon')
+        clearOverlayType('polyline')
+        clearOverlayType('circle')
+        clearOverlayType('rectangle')
+        markerList = []
+        polygons = []
+        polylines = []
+        circles = []
+        rectangles = []
+        return
+    }
+    // 逐个移除标记
+    for (let i = 0; i < markerList.length; i++) {
+        markerList[i].remove()
+    }
+    markerList = []
+    clearOverlayType('marker')
+    clearOverlayType('label')
+    // 鸿蒙 MapKit clear() 清除覆盖物；TileOverlay 在 mapCommon 模块，
+    // 先显式移除旧瓦片防止重复叠加，clear() 后重建瓦片（瓦片不属于覆盖物语义）
+    tileOverlay?.remove()
+    labelOverlay?.remove()
+    mapController.clear()
+    // context7 验证：MapKit clear() 清除所有覆盖物（含 TileOverlay），customTileOverlays 需同步清空
+    // 否则残留引用指向已移除的瓦片图层，后续 removeCustomTileLayer 调用 .remove() 会 double-free
+    customTileOverlays.clear()
+    // 同步重置所有内部状态
+    clearOverlayType('polygon')
+    clearOverlayType('polyline')
+    clearOverlayType('circle')
+    clearOverlayType('rectangle')
+    polygons = []
+    polylines = []
+    circles = []
+    rectangles = []
+    // 瓦片重建 fire-and-forget（不阻塞返回，接口签名 void 要求同步返回）
+    createTileLayerPair(currentMapType, currentApiKey).then((pair: { base: map.TileOverlay | null, label: map.TileOverlay | null }) => {
+        tileOverlay = pair.base
+        labelOverlay = pair.label
+        const idx = getTypeIndex(currentMapType)
+        for (let i = 0; i < 3; i++) {
+            if (i == idx) {
+                allTileOverlays[i] = { base: pair.base, label: pair.label }
+            } else {
+                allTileOverlays[i] = { base: null, label: null }
+            }
+        }
+    }).catch((e: any) => {
+        console.error("TDTMap: clearOverlays 瓦片重建失败: " + (e.message ?? String(e)))
+    })
+}
+
+export function snapshot(): ArrayBuffer {
+    // HarmonyOS MapKit 无快照 API，回调错误并返回空 ArrayBuffer（平台差异显式上报，禁止静默失败）
+    if (onErrorCallback != null) {
+        onErrorCallback({ code: 4, message: 'Snapshot not supported on HarmonyOS MapKit' })
+    }
+    return new ArrayBuffer(0)
+}
+
+export function onResume(): void { /* MapKit 自动管理 */ }
+export function onPause(): void { /* MapKit 自动管理 */ }
+
+export function destroyMap(): void {
+    // 移除所有预创建的瓦片图层
+    for (let i = 0; i < 3; i++) {
+        allTileOverlays[i].base?.remove()
+        allTileOverlays[i].label?.remove()
+    }
+    allTileOverlays = [
+        { base: null, label: null },
+        { base: null, label: null },
+        { base: null, label: null }
+    ]
+    tileOverlay = null
+    labelOverlay = null
+
+    // 清除所有标记
+    for (let i = 0; i < markerList.length; i++) {
+        markerList[i].remove()
+    }
+    markerList = []
+
+    // 清除所有多边形
+    for (let i = 0; i < polygons.length; i++) {
+        polygons[i].remove()
+    }
+    polygons = []
+    // 清除所有其他覆盖物
+    for (let i = 0; i < polylines.length; i++) {
+        polylines[i].remove()
+    }
+    polylines = []
+    for (let i = 0; i < circles.length; i++) {
+        circles[i].remove()
+    }
+    circles = []
+    for (let i = 0; i < rectangles.length; i++) {
+        rectangles[i].remove()
+    }
+    rectangles = []
+
+    mapController = null
+    builderNode = null
+    onClickCallback = null
+    onReadyCallback = null
+    onErrorCallback = null
+    markerClickCallback = null
+    mapLongClickCallback = null
+    cameraChangeCallback = null
+    overlayMap.clear()
+    overlayIdCounter = 0
+    currentApiKey = ''
+    currentMapType = 'vec'
+    currentLat = 0
+    currentLng = 0
+    currentZoom = 0
+    currentBearing = 0
+    currentTilt = 0
+    customTileOverlays.clear()
+}
+
+// ==================== 缩放控制 ====================
+
+export function zoomIn(): void {
+    if (mapController != null) {
+        currentZoom = currentZoom + 1
+        // context7 验证：完整 CameraPosition 包含 target
+        mapController.setCameraPosition({
+            target: { latitude: currentLat, longitude: currentLng },
+            zoom: currentZoom,
+            bearing: currentBearing,
+            tilt: currentTilt
+        })
+    }
+}
+
+export function zoomOut(): void {
+    if (mapController != null) {
+        currentZoom = currentZoom - 1
+        // context7 验证：完整 CameraPosition 包含 target
+        mapController.setCameraPosition({
+            target: { latitude: currentLat, longitude: currentLng },
+            zoom: currentZoom,
+            bearing: currentBearing,
+            tilt: currentTilt
+        })
+    }
+}
+
+export function setMinZoom(zoom: number): void {
+    if (mapController != null) {
+        mapController.setMinZoom(zoom)
+    }
+}
+
+export function setMaxZoom(zoom: number): void {
+    if (mapController != null) {
+        mapController.setMaxZoom(zoom)
+    }
+}
+
+// ==================== 视野移动 ====================
+
+export function panTo(lat: number, lng: number, zoom?: number): void {
+    if (mapController == null) return
+    currentLat = lat
+    currentLng = lng
+    // context7 验证：CameraPosition 始终包含 target + zoom，zoom 未传时使用当前值
+    const pos: mapCommon.CameraPosition = {
+        target: { latitude: lat, longitude: lng },
+        zoom: zoom != null ? zoom : currentZoom,
+        bearing: currentBearing,
+        tilt: currentTilt
+    }
+    if (zoom != null) {
+        currentZoom = zoom
+    }
+    mapController.setCameraPosition(pos)
+}
+
+export function centerAndZoom(lat: number, lng: number, zoom: number): void {
+    if (mapController == null) return
+    currentLat = lat
+    currentLng = lng
+    currentZoom = zoom
+    mapController.setCameraPosition({
+        target: { latitude: lat, longitude: lng },
+        zoom: zoom,
+        bearing: currentBearing,
+        tilt: currentTilt
+    })
+}
+
+// ==================== 手势控制 ====================
+// context7 验证：HarmonyOS MapKit 提供 setZoomGesturesEnabled / setScrollGesturesEnabled 运行时手势开关
+
+export function enableZoom(enabled: boolean): void {
+    if (mapController != null) {
+        mapController.setZoomGesturesEnabled(enabled)
+    }
+}
+
+export function enableDrag(enabled: boolean): void {
+    if (mapController != null) {
+        mapController.setScrollGesturesEnabled(enabled)
+    }
+}
+
+// ==================== 范围限制 ====================
+
+export function setMaxBounds(minLat: number, minLng: number, maxLat: number, maxLng: number): void {
+    if (mapController == null) return
+    const bounds: mapCommon.LatLngBounds = {
+        southwest: { latitude: minLat, longitude: minLng },
+        northeast: { latitude: maxLat, longitude: maxLng }
+    }
+    mapController.setLatLngBounds(bounds)
+}
+
+// ==================== 信息获取 ====================
+// 鸿蒙 MapKit 无 getVisibleRegion API，按规则上报不支持
+
+export function getBounds(): MapBoundsDetail {
+    if (onErrorCallback != null) {
+        onErrorCallback({ code: 4, message: 'getBounds not supported on HarmonyOS MapKit' })
+    }
+    return { minLat: 0, minLng: 0, maxLat: 0, maxLng: 0 }
+}
+
+// ==================== 坐标转换（纯数学，三端通用） ====================
+// 算法来源：Wikipedia GCJ-02 article + eviltransform (GitHub)
+// 注意：禁止在天地图插件中引入 WGS84→GCJ02 转换（会反向引入偏差），仅提供 GCJ02→WGS84
+
+const GCJ_PI = 3.14159265358979323846
+const GCJ_A = 6378245.0
+const GCJ_EE = 0.00669342162296594323
+
+function isOutOfChina(lat: number, lng: number): boolean {
+    return lng < 72.004 || lng > 137.8347 || lat < 0.8293 || lat > 55.8271
+}
+
+function gcjTransformLat(x: number, y: number): number {
+    let ret = -100.0 + 2.0 * x + 3.0 * y + 0.2 * y * y + 0.1 * x * y + 0.2 * Math.sqrt(Math.abs(x))
+    ret += (20.0 * Math.sin(6.0 * x * GCJ_PI) + 20.0 * Math.sin(2.0 * x * GCJ_PI)) * 2.0 / 3.0
+    ret += (20.0 * Math.sin(y * GCJ_PI) + 40.0 * Math.sin(y / 3.0 * GCJ_PI)) * 2.0 / 3.0
+    ret += (160.0 * Math.sin(y / 12.0 * GCJ_PI) + 320.0 * Math.sin(y * GCJ_PI / 30.0)) * 2.0 / 3.0
+    return ret
+}
+
+function gcjTransformLng(x: number, y: number): number {
+    let ret = 300.0 + x + 2.0 * y + 0.1 * x * x + 0.1 * x * y + 0.1 * Math.sqrt(Math.abs(x))
+    ret += (20.0 * Math.sin(6.0 * x * GCJ_PI) + 20.0 * Math.sin(2.0 * x * GCJ_PI)) * 2.0 / 3.0
+    ret += (20.0 * Math.sin(x * GCJ_PI) + 40.0 * Math.sin(x / 3.0 * GCJ_PI)) * 2.0 / 3.0
+    ret += (150.0 * Math.sin(x / 12.0 * GCJ_PI) + 300.0 * Math.sin(x / 30.0 * GCJ_PI)) * 2.0 / 3.0
+    return ret
+}
+
+type Gcj02Delta = { dLat: number, dLng: number }
+function wgs84ToGcj02Delta(lat: number, lng: number): Gcj02Delta {
+    const dLat = gcjTransformLat(lng - 105.0, lat - 35.0)
+    const dLng = gcjTransformLng(lng - 105.0, lat - 35.0)
+    const radLat = lat / 180.0 * GCJ_PI
+    let magic = Math.sin(radLat)
+    magic = 1 - GCJ_EE * magic * magic
+    const sqrtMagic = Math.sqrt(magic)
+    const dLatFinal = (dLat * 180.0) / ((GCJ_A * (1 - GCJ_EE)) / (magic * sqrtMagic) * GCJ_PI)
+    const dLngFinal = (dLng * 180.0) / (GCJ_A / sqrtMagic * Math.cos(radLat) * GCJ_PI)
+    return { dLat: dLatFinal, dLng: dLngFinal }
+}
+
+export function gcj02ToWgs84(lat: number, lng: number): MapClickDetail {
+    if (isOutOfChina(lat, lng)) {
+        return { lat: lat, lng: lng }
+    }
+    let wgsLat = lat
+    let wgsLng = lng
+    for (let i = 0; i < 3; i++) {
+        const delta = wgs84ToGcj02Delta(wgsLat, wgsLng)
+        const gcjLat = wgsLat + delta.dLat
+        const gcjLng = wgsLng + delta.dLng
+        wgsLat -= (gcjLat - lat)
+        wgsLng -= (gcjLng - lng)
+    }
+    return { lat: wgsLat, lng: wgsLng }
+}
+
+// ══════════════════════════════════════════════
+// 覆盖物管理：单个操作
+// ══════════════════════════════════════════════
+
+// context7 验证：HarmonyOS 所有覆盖物均支持 remove() 和 setVisible()
+export function removeOverlay(id: number): void {
+    const entry = overlayMap.get(id)
+    if (entry == null) {
+        overlayMap.delete(id)
+        return
+    }
+    const ref = entry.nativeRef
+    if (ref == null) {
+        overlayMap.delete(id)
+        return
+    }
+    try {
+        ref.remove()
+    } catch (e: any) {
+        console.error("TDTMap: removeOverlay 失败: " + (e.message ?? String(e)))
+    }
+    // 同步清理类型数组
+    if (entry.type == 'marker' || entry.type == 'label') {
+        markerList = markerList.filter(m => m !== ref)
+    } else if (entry.type == 'polygon') {
+        polygons = polygons.filter(p => p !== ref)
+    } else if (entry.type == 'polyline') {
+        polylines = polylines.filter(p => p !== ref)
+    } else if (entry.type == 'circle') {
+        circles = circles.filter(c => c !== ref)
+    } else if (entry.type == 'rectangle') {
+        rectangles = rectangles.filter(r => r !== ref)
+    }
+    overlayMap.delete(id)
+}
+
+// context7 验证：HarmonyOS BaseOverlay.setVisible(boolean) 控制可见性
+export function showOverlay(id: number): void {
+    const entry = overlayMap.get(id)
+    if (entry == null) return
+    const ref = entry.nativeRef
+    if (ref == null || entry.isVisible) return
+    try {
+        ref.setVisible(true)
+        entry.isVisible = true
+    } catch (e: any) {
+        console.error("TDTMap: showOverlay 失败: " + (e.message ?? String(e)))
+    }
+}
+
+export function hideOverlay(id: number): void {
+    const entry = overlayMap.get(id)
+    if (entry == null) return
+    const ref = entry.nativeRef
+    if (ref == null || !entry.isVisible) return
+    try {
+        ref.setVisible(false)
+        entry.isVisible = false
+    } catch (e: any) {
+        console.error("TDTMap: hideOverlay 失败: " + (e.message ?? String(e)))
+    }
+}
+
+// ══════════════════════════════════════════════
+// 标记点击事件
+// ══════════════════════════════════════════════
+
+// context7 验证：HarmonyOS MapKit 使用 getEventManager().on('markerClick') 实现标记点击
+// ⚠️ 监听器已在 initMap 的 .then() 中统一注册，此处仅更新回调引用，
+// 禁止重复注册 evtMgr.on('markerClick') 否则会双重触发 emit('markertap')
+@UTSJS.keepAlive
+export function setMarkerClickCallback(callback: MarkerClickCallback): void {
+    markerClickCallback = callback
+    // 不再重复注册监听器：initMap 中注册的监听器通过闭包引用 markerClickCallback 模块变量，
+    // 变量更新后监听器自动读取最新值（JavaScript 闭包按引用捕获变量）
+}
+
+// ══════════════════════════════════════════════
+// 地图工具
+// ══════════════════════════════════════════════
+
+// context7 验证：HarmonyOS MapKit 暂无 resize API，no-op
+export function checkResize(): void {
+    // HarmonyOS MapKit 自动响应布局变化，无需手动触发
+}
+
+// context7 验证：HarmonyOS MapKit 支持 scrollBy 像素级平移
+export function planBy(x: number, y: number): void {
+    if (mapController != null) {
+        mapController.scrollBy(x, y)
+    }
+}
+
+// context7 验证：通过 LatLngBounds 计算 + setCameraPosition 实现视野适配
+export function setViewport(points: Array<MapClickDetail>): void {
+    if (mapController == null || points.length == 0) return
+    let minLat = points[0].lat, maxLat = points[0].lat
+    let minLng = points[0].lng, maxLng = points[0].lng
+    for (let i = 1; i < points.length; i++) {
+        if (points[i].lat < minLat) minLat = points[i].lat
+        if (points[i].lat > maxLat) maxLat = points[i].lat
+        if (points[i].lng < minLng) minLng = points[i].lng
+        if (points[i].lng > maxLng) maxLng = points[i].lng
+    }
+    const centerLat = (minLat + maxLat) / 2
+    const centerLng = (minLng + maxLng) / 2
+    const latSpan = maxLat - minLat
+    const lngSpan = maxLng - minLng
+    const maxSpan = Math.max(latSpan, lngSpan)
+    let zoom = Math.log(360 / maxSpan) / Math.log(2)
+    if (zoom < 1) zoom = 1
+    if (zoom > 20) zoom = 20
+    currentLat = centerLat
+    currentLng = centerLng
+    currentZoom = zoom
+    mapController.setCameraPosition({
+        target: { latitude: centerLat, longitude: centerLng },
+        zoom: zoom
+    })
+}
+
+// context7 验证：HarmonyOS 容器尺寸需从 UniNativeViewElement 获取，此处返回 0
+export function getSize(): MapSizeDetail {
+    // HarmonyOS MapKit 暂无直接获取容器像素尺寸的 API
+    return { width: 0, height: 0 }
+}
+
+// ══════════════════════════════════════════════
+// 信息计算（纯数学，三端通用）
+// ══════════════════════════════════════════════
+
+const HAV_EARTH_RADIUS = 6371000.0
+
+function toRadians(deg: number): number {
+    return deg * Math.PI / 180.0
+}
+
+export function getDistance(start: MapClickDetail, end: MapClickDetail): number {
+    const dLat = toRadians(end.lat - start.lat)
+    const dLng = toRadians(end.lng - start.lng)
+    const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+        Math.cos(toRadians(start.lat)) * Math.cos(toRadians(end.lat)) *
+        Math.sin(dLng / 2) * Math.sin(dLng / 2)
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+    return HAV_EARTH_RADIUS * c
+}
+
+export function getViewport(points: Array<MapClickDetail>): MapViewportDetail {
+    if (points.length == 0) {
+        return { center: { lat: 0, lng: 0 }, zoom: 10 }
+    }
+    let minLat = points[0].lat, maxLat = points[0].lat
+    let minLng = points[0].lng, maxLng = points[0].lng
+    for (let i = 1; i < points.length; i++) {
+        if (points[i].lat < minLat) minLat = points[i].lat
+        if (points[i].lat > maxLat) maxLat = points[i].lat
+        if (points[i].lng < minLng) minLng = points[i].lng
+        if (points[i].lng > maxLng) maxLng = points[i].lng
+    }
+    const centerLat = (minLat + maxLat) / 2
+    const centerLng = (minLng + maxLng) / 2
+    const latSpan = maxLat - minLat
+    const lngSpan = maxLng - minLng
+    const maxSpan = Math.max(latSpan, lngSpan)
+    let zoom = Math.log(360 / maxSpan) / Math.log(2)
+    if (zoom < 1) zoom = 1
+    if (zoom > 20) zoom = 20
+    return { center: { lat: centerLat, lng: centerLng }, zoom: zoom }
+}
+
+export function getCode(): string {
+    return 'EPSG:4326'
+}
+
+// ══════════════════════════════════════════════
+// 天地图 Web API（搜索/地理编码）
+// ══════════════════════════════════════════════
+
+// context7 验证：天地图官方同时支持 HTTP/HTTPS，使用 HTTPS 避免各平台明文流量限制
+const TDT_API_BASE = 'https://api.tianditu.gov.cn'
+
+function tiandituHttpRequest(urlStr: string, callback: GeocodeCallback): void {
+    const httpRequest = http.createHttp()
+    httpRequest.request(urlStr, {
+        method: http.RequestMethod.GET,
+        connectTimeout: 10000,
+        readTimeout: 10000
+    }, (err: any, data: any) => {
+        if (err != null) {
+            console.error("TDTMap: HTTP 请求失败: " + (err.message ?? String(err)))
+            callback({ status: '404', msg: err.message ?? 'Network error' } as UTSJSONObject)
+        } else {
+            try {
+                const resultStr = data.result as string
+                // v1.5.4: JSON.parse 对非法 JSON 返回 null（如接口返回 HTML 错误页），直接 as 会抛崩溃
+                const parsed = JSON.parse(resultStr)
+                if (parsed == null) {
+                    callback({ status: '404', msg: 'Invalid JSON response' } as UTSJSONObject)
+                    return
+                }
+                callback(parsed as UTSJSONObject)
+            } catch (e: any) {
+                callback({ status: '404', msg: e.message ?? 'Parse error' } as UTSJSONObject)
+            }
+        }
+        httpRequest.destroy()
+    })
+}
+
+// context7 验证：ArkTS 原生支持 encodeURIComponent，使用 UTF-8 编码，比手动 charCodeAt (UCS-2) 实现更正确
+function urlEncode(str: string): string {
+    return encodeURIComponent(str)
+}
+
+@UTSJS.keepAlive
+export function geocode_getLocation(lnglat: MapClickDetail, callback: GeocodeCallback): void {
+    const key = currentApiKey
+    if (key.length == 0) {
+        callback({ status: '1', msg: 'No API Key' } as UTSJSONObject)
+        return
+    }
+    const postStr = "{'lon':" + lnglat.lng.toString() + ",'lat':" + lnglat.lat.toString() + ",'ver':1}"
+    const urlStr = TDT_API_BASE + '/geocoder?postStr=' + urlEncode(postStr) + '&type=geocode&tk=' + key
+    tiandituHttpRequest(urlStr, callback)
+}
+
+@UTSJS.keepAlive
+export function geocode_getPoint(address: string, callback: GeocodeCallback): void {
+    const key = currentApiKey
+    if (key.length == 0) {
+        callback({ status: '1', msg: 'No API Key' } as UTSJSONObject)
+        return
+    }
+    const postStr = '{"keyWord":"' + address + '"}'
+    const urlStr = TDT_API_BASE + '/geocoder?ds=' + urlEncode(postStr) + '&tk=' + key
+    tiandituHttpRequest(urlStr, callback)
+}
+
+function buildSearchUrl(params: SearchOptions): string {
+    const key = currentApiKey
+    // v1.5.4: 天地图老 /search 接口已下线（404 非 JSON 响应导致解析崩溃），
+    // 改用官方「地名搜索2.0」/v2/search（context7 实测验证）：
+    // queryType 必填且仅 12（行政区划搜索）可用；specify 必填（行政区国标码，默认 156000000=中国）；
+    // level/mapBound/queryRadius/pointLonlat 等 v1 参数 v2 不再支持，不再拼入 URL
+    const specify = params.specifyAdminCode != null && params.specifyAdminCode.length > 0 ? params.specifyAdminCode : '156000000'
+    let postJson = '{"keyWord":"' + params.keyWord + '","queryType":"12","specify":"' + specify + '"'
+    if (params.start != null && params.start.length > 0) {
+        postJson += ',"start":"' + params.start + '"'
+    }
+    if (params.count != null && params.count.length > 0) {
+        postJson += ',"count":"' + params.count + '"'
+    }
+    postJson += '}'
+    return TDT_API_BASE + '/v2/search?postStr=' + urlEncode(postJson) + '&type=query&tk=' + key
+}
+
+@UTSJS.keepAlive
+export function search(params: SearchOptions, callback: GeocodeCallback): void {
+    if (currentApiKey.length == 0) {
+        callback({ status: '1', msg: 'No API Key' } as UTSJSONObject)
+        return
+    }
+    // v1.5.5: 清理死代码——buildSearchUrl 已硬编码 queryType=12，v1 遗留的 queryType 兜底赋值不再生效
+    tiandituHttpRequest(buildSearchUrl(params), callback)
+}
+
+@UTSJS.keepAlive
+export function searchInBounds(params: SearchOptions, callback: GeocodeCallback): void {
+    if (currentApiKey.length == 0) {
+        callback({ status: '1', msg: 'No API Key' } as UTSJSONObject)
+        return
+    }
+    tiandituHttpRequest(buildSearchUrl(params), callback)
+}
+
+@UTSJS.keepAlive
+export function searchNearby(params: SearchOptions, callback: GeocodeCallback): void {
+    if (currentApiKey.length == 0) {
+        callback({ status: '1', msg: 'No API Key' } as UTSJSONObject)
+        return
+    }
+    tiandituHttpRequest(buildSearchUrl(params), callback)
+}
+
+// ══════════════════════════════════════════════
+// v1.3.0 新增：定位
+// ══════════════════════════════════════════════
+
+// context7 验证：HarmonyOS MapKit setMyLocationEnabled 显示用户位置蓝点
+// 需在 module.json5 中声明 ohos.permission.LOCATION 和 ohos.permission.APPROXIMATELY_LOCATION
+export function showUserLocation(enabled: boolean): void {
+    if (mapController == null) {
+        if (onErrorCallback != null) {
+            onErrorCallback({ code: 4, message: "地图未初始化，无法显示定位" })
+        }
+        return
+    }
+    try {
+        mapController.setMyLocationEnabled(enabled)
+    } catch (e: any) {
+        console.error("TDTMap: showUserLocation 失败: " + (e.message ?? String(e)))
+        if (onErrorCallback != null) {
+            onErrorCallback({ code: 4, message: "定位显示失败: " + (e.message ?? String(e)) })
+        }
+    }
+}
+
+// context7 验证：HarmonyOS geoLocationManager.getCurrentLocation 获取单次定位
+@UTSJS.keepAlive
+export function getUserLocation(callback: (detail: MapClickDetail) => void, onError?: (err: MapErrorDetail) => void): void {
+    try {
+        geoLocationManager.getCurrentLocation((err: any, location: any) => {
+            if (err != null) {
+                console.error("TDTMap: getUserLocation 失败: " + (err.message ?? String(err)))
+                if (onError != null) {
+                    onError({ code: 4, message: "获取定位失败: " + (err.message ?? String(err)) })
+                } else if (onErrorCallback != null) {
+                    onErrorCallback({ code: 4, message: "获取定位失败: " + (err.message ?? String(err)) })
+                }
+                return
+            }
+            if (location != null) {
+                callback({ lat: location.latitude, lng: location.longitude })
+            } else {
+                if (onError != null) {
+                    onError({ code: 4, message: "定位返回空，请检查定位权限" })
+                }
+            }
+        })
+    } catch (e: any) {
+        console.error("TDTMap: getUserLocation 异常: " + (e.message ?? String(e)))
+        if (onError != null) {
+            onError({ code: 4, message: "获取定位异常: " + (e.message ?? String(e)) })
+        }
+    }
+}
+
+// ══════════════════════════════════════════════
+// v1.3.0 新增：信息窗口
+// ══════════════════════════════════════════════
+
+// context7 验证：HarmonyOS MapKit Marker 支持 showInfoWindow() / hideInfoWindow()
+export function showMarkerInfo(id: number): void {
+    const entry = overlayMap.get(id)
+    if (entry == null) return
+    if (entry.type == 'marker' || entry.type == 'label') {
+        const mk = entry.nativeRef
+        if (mk == null) {
+            console.warn("TDTMap: showMarkerInfo - marker 尚未异步创建完成 (nativeRef=null)")
+            return
+        }
+        try {
+            mk.showInfoWindow()
+        } catch (e: any) {
+            console.error("TDTMap: showMarkerInfo 失败: " + (e.message ?? String(e)))
+        }
+    }
+}
+
+export function hideMarkerInfo(id: number): void {
+    const entry = overlayMap.get(id)
+    if (entry == null) return
+    if (entry.type == 'marker' || entry.type == 'label') {
+        const mk = entry.nativeRef
+        if (mk == null) return
+        try {
+            mk.hideInfoWindow()
+        } catch (e: any) {
+            console.error("TDTMap: hideMarkerInfo 失败: " + (e.message ?? String(e)))
+        }
+    }
+}
+
+// ══════════════════════════════════════════════
+// v1.3.0 新增：自定义瓦片图层
+// ══════════════════════════════════════════════
+
+// context7 验证：HarmonyOS MapKit addTileOverlay 最多支持 10 个瓦片图层
+let customTileOverlays = new Map<string, map.TileOverlay>()
+
+export function addCustomTileLayer(id: string, tileUrl: string): void {
+    if (mapController == null) {
+        if (onErrorCallback != null) {
+            onErrorCallback({ code: 4, message: "地图未初始化，无法添加瓦片图层" })
+        }
+        return
+    }
+    // 若已存在同 ID 图层，先移除旧层
+    removeCustomTileLayer(id)
+    try {
+        const options: mapCommon.TileOverlayParams = {
+            tileUrl: tileUrl,
+            transparency: 0,
+            fadeIn: true
+        }
+        // context7 验证：addTileOverlay 返回 TileOverlay（同步，非 Promise），直接赋值即可
+        const overlay = mapController.addTileOverlay(options)
+        customTileOverlays.set(id, overlay)
+    } catch (e: any) {
+        console.error("TDTMap: addCustomTileLayer 异常: " + (e.message ?? String(e)))
+        if (onErrorCallback != null) {
+            onErrorCallback({ code: 4, message: "添加瓦片图层失败: " + (e.message ?? String(e)) })
+        }
+    }
+}
+
+export function removeCustomTileLayer(id: string): void {
+    const overlay = customTileOverlays.get(id)
+    if (overlay == null) return
+    try {
+        overlay.remove()
+    } catch (e: any) {
+        console.error("TDTMap: removeCustomTileLayer 失败: " + (e.message ?? String(e)))
+    }
+    customTileOverlays.delete(id)
+}
+
+// ══════════════════════════════════════════════
+// v1.4.0 新增：地图交互增强
+// ══════════════════════════════════════════════
+
+// context7 验证：setMapLongClickCallback 存储回调（实际监听在 initMap 中注册）
+@UTSJS.keepAlive
+export function setMapLongClickCallback(callback: MapLongClickCallback): void {
+    mapLongClickCallback = callback
+}
+
+// context7 验证：HarmonyOS CameraPosition.bearing 设置旋转角度（0=正北，顺时针）
+export function setBearing(bearing: number): void {
+    if (mapController == null) return
+    currentBearing = bearing
+    mapController.setCameraPosition({
+        target: { latitude: currentLat, longitude: currentLng },
+        zoom: currentZoom,
+        bearing: bearing,
+        tilt: currentTilt
+    })
+}
+
+// context7 验证：HarmonyOS CameraPosition.tilt 设置倾斜角度（0=垂直俯瞰，范围 0~75）
+export function setTilt(tilt: number): void {
+    if (mapController == null) return
+    currentTilt = tilt
+    mapController.setCameraPosition({
+        target: { latitude: currentLat, longitude: currentLng },
+        zoom: currentZoom,
+        bearing: currentBearing,
+        tilt: tilt
+    })
+}
+
+// context7 验证：getCameraPosition().bearing 读取当前旋转角度
+export function getBearing(): number {
+    if (mapController != null) {
+        const pos = mapController.getCameraPosition()
+        if (pos != null && pos.bearing != null) return pos.bearing
+    }
+    return currentBearing
+}
+
+// context7 验证：getCameraPosition().tilt 读取当前倾斜角度
+export function getTilt(): number {
+    if (mapController != null) {
+        const pos = mapController.getCameraPosition()
+        if (pos != null && pos.tilt != null) return pos.tilt
+    }
+    return currentTilt
+}
+
+// context7 验证：setRotateGesturesEnabled 控制双指旋转手势
+export function enableRotate(enabled: boolean): void {
+    if (mapController != null) {
+        mapController.setRotateGesturesEnabled(enabled)
+    }
+}
+
+// context7 验证：setTiltGesturesEnabled 控制双指倾斜手势（鸿蒙 4.1.0(11)+ 支持）
+export function enableTilt(enabled: boolean): void {
+    if (mapController != null) {
+        mapController.setTiltGesturesEnabled(enabled)
+    }
+}
+
+// context7 验证：setCameraChangeCallback 存储回调（实际监听在 initMap 中注册）
+@UTSJS.keepAlive
+export function setCameraChangeCallback(callback: CameraChangeCallback): void {
+    cameraChangeCallback = callback
+}

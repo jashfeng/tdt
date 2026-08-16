@@ -1,0 +1,9 @@
+# IDE 配置目录（Qoder 本地配置，不入库）
+.qoder/
+.qoder-cn/
+
+# 压缩包产物
+*.zip
+
+# 临时调试文件
+tmp-*.uts

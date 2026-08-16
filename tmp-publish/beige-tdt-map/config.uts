@@ -1,0 +1,28 @@
+/**
+ * tdt-map 插件全局配置
+ *
+ * 使用说明：
+ * 1. 在下方填入你的天地图 Key（申请地址：https://console.tianditu.gov.cn/）
+ * 2. 填写一次即全局生效，所有页面的 <tdt-map> 组件自动使用此 Key
+ * 3. 组件 props 传入 apiKey 时优先级高于此处配置（适合多 Key 场景）
+ *
+ * ⚠️ Key 类型说明（必须使用正确类型，否则瓦片 403）：
+ *   - apiKey：App 端（Android/iOS/鸿蒙）使用，需创建「服务端」或「Android 平台」类型
+ *   - webApiKey：Web 端（浏览器）使用，需创建「浏览器端」类型，并在控制台设置 Referer 白名单
+ *   - 如果只配了 apiKey 没配 webApiKey，Web 端会 fallback 使用 apiKey（可能出现 403）
+ *
+ * 安全提示：
+ * - 本文件会被编译进原生包，请勿将含真实 Key 的本文件提交到公开仓库
+ * - 建议将 config.uts 加入 .gitignore，仓库中仅保留不含 Key 的模板
+ */
+type TDTMapGlobalConfig = {
+    apiKey: string
+    webApiKey: string
+}
+
+const config: TDTMapGlobalConfig = {
+    apiKey: '',
+    webApiKey: ''
+}
+
+export default config
