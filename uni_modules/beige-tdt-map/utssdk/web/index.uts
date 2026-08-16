@@ -279,6 +279,9 @@ export function initMap(
 
             // 点击事件
             map.on('click', (e: any) => {
+                // v1.7.0: 聚合簇点击由 onClusterClick 处理（放大展开），通用 click 不重复触发（与 Android/iOS 消费事件语义一致）
+                const clusterHits = map.queryRenderedFeatures(e.point, { layers: ['tdt-cluster-layer'] })
+                if (clusterHits != null && clusterHits.length > 0) return
                 if (mapClickCallback != null) {
                     mapClickCallback({ lat: e.lngLat.lat, lng: e.lngLat.lng })
                 }
