@@ -650,6 +650,9 @@ export function destroyMap(): void {
     if (mapView != null) {
         mapView.removeFromSuperview()
         mapView = null
+        // v1.7.0: 清理聚合/热力引用（mapView 已置空，函数内部走空值分支仅置空引用）
+        removeMarkerCluster()
+        removeHeatmap()
         const delegate = mapViewDelegate
         mapViewDelegate = null
         onClickCallback = null

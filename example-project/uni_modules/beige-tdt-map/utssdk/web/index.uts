@@ -437,6 +437,9 @@ export function onPause(): void { /* Web 无需原生生命周期 */ }
 
 export function destroyMap(): void {
     if (mapInstance != null) {
+        // v1.7.0: 先清理聚合/热力图层（依赖 mapInstance，须在 remove 之前；内部幂等）
+        removeMarkerCluster()
+        removeHeatmap()
         try { mapInstance.remove() } catch (e) { /* ignore */ }
         mapInstance = null
     }

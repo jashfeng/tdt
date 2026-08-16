@@ -258,7 +258,9 @@ export function initMap(
                     const hit = hitFeatures[0]
                     if (hit.getBooleanProperty("cluster")) {
                         const zoom = clusterSrc.getClusterExpansionZoom(hit)
-                        map.animateCamera(CameraUpdateFactory.newLatLngZoom(point, zoom), 300)
+                        // 与 zoomIn/panTo 一致改用 moveCamera 瞬时放大：v1.5.5 实测 animateCamera
+                        // 动画在 UTS 集成下不推进（500ms 零进展），点击聚合簇将无任何响应
+                        map.moveCamera(CameraUpdateFactory.newLatLngZoom(point, zoom.toDouble()))
                         return true  // 聚合点击消费事件：放大展开，不触发 mapClick
                     }
                 }
@@ -781,6 +783,9 @@ export function destroyMap(): void {
         // 跳过 onPause 会导致 mapRenderer.onPause() 未执行，GL 资源无法正确释放
         mv.onPause()
         mv.onStop()
+        // v1.7.0: 销毁前清理聚合/热力图层引用（在 onDestroy 前调用，style 仍可用；函数内部有 try/catch 兜底）
+        removeMarkerCluster()
+        removeHeatmap()
         mv.onDestroy()
     }
     mapView = null
@@ -1865,10 +1870,17 @@ export function addMarkerCluster(points: Array<MapClickDetail>, options?: Cluste
         clusterLayerRefs.push(clusterLayer)
 
         // 聚合簇数量文字（point_count_abbreviated 为引擎自动生成的缩写计数）
+        // text-font 必须为数组（style spec：Optional array；否则符号图层可能被静默拒绝，
+        // 与 Web 端 glyphs 缺陷同类——context7: maplibre.org/maplibre-style-spec/layers/）。
+        // PropertyFactory 仅有 textFont(String[]) 与 textFont(Expression) 两个重载（无 vararg）
+        // ——context7: maplibre-native PropertyFactory.java 源码；UTS Array 对应 ArrayList，
+        // 须 toTypedArray() 转 kotlin.Array 匹配 Java String[] 参数
+        // （context7: UTS 官方文档 data-type.html "Array 转换 kotlin.Array"）
+        const fontStack: Array<string> = ["Open Sans Semibold"]
         const countLayer = new SymbolLayer("tdt-cluster-count", "tdt-cluster-source")
         countLayer.setProperties(
             PropertyFactory.textField(Expression.get("point_count_abbreviated")),
-            PropertyFactory.textFont(Expression.literal("Open Sans Semibold")),
+            PropertyFactory.textFont(fontStack.toTypedArray()),
             PropertyFactory.textSize(12.0.toFloat())
             // 文字颜色用默认黑色（官方 cluster 示例同款）：黄色簇 #F1F075 上白字对比度差，
             // 且 Web/iOS 端均默认黑，三端统一（Task 10 浏览器实测发现）
