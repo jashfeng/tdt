@@ -1496,7 +1496,10 @@ let heatmapRef: any = null
 
 export function addMarkerCluster(points: Array<MapClickDetail>, options?: ClusterOptions): void {
     const ctrl = mapController
-    if (ctrl == null) return
+    if (ctrl == null) {
+        if (onErrorCallback != null) onErrorCallback({ code: 4, message: "地图未初始化，无法添加聚合图层" })
+        return
+    }
     removeMarkerCluster()
     if (points.length == 0) return
     const items: Array<mapCommon.ClusterItem> = []
@@ -1531,7 +1534,10 @@ export function removeMarkerCluster(): void {
 // try/catch 捕获后通过 mapError 显式上报（规则第 7 条：平台差异能力不得静默失败）
 export function addHeatmap(points: Array<HeatmapItem>, options?: HeatmapOptions): void {
     const ctrl = mapController
-    if (ctrl == null) return
+    if (ctrl == null) {
+        if (onErrorCallback != null) onErrorCallback({ code: 4, message: "地图未初始化，无法添加热力图层" })
+        return
+    }
     removeHeatmap()
     if (points.length == 0) return
     const data: Array<mapCommon.WeightedLatLng> = []
@@ -1558,7 +1564,7 @@ export function addHeatmap(points: Array<HeatmapItem>, options?: HeatmapOptions)
         })
     } catch (e: any) {
         // 低版本 MapKit（< 6.0.0(20)）无 addHeatmap 方法：显式上报能力不支持
-        console.warn("TDTMap: 当前 MapKit 版本不支持热力图（需 HarmonyOS 6.0+）: " + (e.message ?? String(e)))
+        console.error("TDTMap: 当前 MapKit 版本不支持热力图（需 HarmonyOS 6.0+）: " + (e.message ?? String(e)))
         if (onErrorCallback != null) {
             onErrorCallback({ code: 4, message: "当前 MapKit 版本不支持热力图（需 HarmonyOS 6.0 / API 20+）" })
         }

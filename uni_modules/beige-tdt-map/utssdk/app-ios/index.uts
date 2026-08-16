@@ -1377,9 +1377,11 @@ export function addMarkerCluster(points: Array<MapClickDetail>, options?: Cluste
             f.coordinate = CLLocationCoordinate2DMake(points[i].lat, points[i].lng)
             features.push(f)
         }
-        const opts = NSDictionary.dictionaryWithObjectsForKeys(
+        // UTS iOS 调用约定：选择子首段作方法名 + 后续参数带标签（与 setCenterCoordinate(center, zoom, true)、
+        // convertPoint(point, toCoordinateFromView:) 一致）：dictionaryWithObjects:forKeys: → dictionaryWithObjects(... forKeys:)
+        const opts = NSDictionary.dictionaryWithObjects(
             [true, (options?.clusterRadius ?? 50).toInt32(), (options?.clusterMaxZoom ?? 14).toInt32()],
-            [MLNShapeSourceOption.clustered, MLNShapeSourceOption.clusterRadius, MLNShapeSourceOption.maximumZoomLevelForClustering]
+            forKeys: [MLNShapeSourceOption.clustered, MLNShapeSourceOption.clusterRadius, MLNShapeSourceOption.maximumZoomLevelForClustering]
         ) as NSDictionary
         const source = new MLNShapeSource("tdt-cluster-source", features as MLNShape[], opts)
         mapView.style?.addSource(source)
@@ -1434,7 +1436,7 @@ export function addHeatmap(points: Array<HeatmapItem>, options?: HeatmapOptions)
         for (let i = 0; i < points.length; i++) {
             const f = new MLNPointFeature()
             f.coordinate = CLLocationCoordinate2DMake(points[i].lat, points[i].lng)
-            f.attributes = NSDictionary.dictionaryWithObjectsForKeys([points[i].weight ?? 1], ["weight"]) as any
+            f.attributes = NSDictionary.dictionaryWithObjects([points[i].weight ?? 1], forKeys: ["weight"]) as any
             features.push(f)
         }
         const source = new MLNShapeSource("tdt-heatmap-source", features as MLNShape[], null)

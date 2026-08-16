@@ -1806,7 +1806,6 @@ export function setCameraChangeCallback(callback: CameraChangeCallback): void {
 // ══════════════════════════════════════════════
 let clusterSourceRef: GeoJsonSource | null = null
 let clusterLayerRefs: Array<CircleLayer | SymbolLayer> = []
-let heatmapSourceRef: GeoJsonSource | null = null
 let heatmapLayerRef: HeatmapLayer | null = null
 
 function buildPointFeatures(points: Array<MapClickDetail>): FeatureCollection {
@@ -1855,9 +1854,9 @@ export function addMarkerCluster(points: Array<MapClickDetail>, options?: Cluste
         const clusterLayer = new CircleLayer("tdt-cluster-layer", "tdt-cluster-source")
         clusterLayer.setProperties(
             PropertyFactory.circleColor(Color.parseColor("#51BBD6")),
-            PropertyFactory.circleRadius(20.0),
+            PropertyFactory.circleRadius(20.0.toFloat()),
             PropertyFactory.circleStrokeColor(Color.parseColor("#FFFFFF")),
-            PropertyFactory.circleStrokeWidth(1.0)
+            PropertyFactory.circleStrokeWidth(1.0.toFloat())
         )
         clusterLayer.setFilter(Expression.has("point_count"))
         style.addLayer(clusterLayer)
@@ -1867,7 +1866,7 @@ export function addMarkerCluster(points: Array<MapClickDetail>, options?: Cluste
         const countLayer = new SymbolLayer("tdt-cluster-count", "tdt-cluster-source")
         countLayer.setProperties(
             PropertyFactory.textField(Expression.get("point_count_abbreviated")),
-            PropertyFactory.textSize(12.0),
+            PropertyFactory.textSize(12.0.toFloat()),
             PropertyFactory.textColor(Color.parseColor("#FFFFFF"))
         )
         countLayer.setFilter(Expression.has("point_count"))
@@ -1878,9 +1877,9 @@ export function addMarkerCluster(points: Array<MapClickDetail>, options?: Cluste
         const unclusterLayer = new CircleLayer("tdt-cluster-unclustered", "tdt-cluster-source")
         unclusterLayer.setProperties(
             PropertyFactory.circleColor(Color.parseColor("#11B4DA")),
-            PropertyFactory.circleRadius(5.0),
+            PropertyFactory.circleRadius(5.0.toFloat()),
             PropertyFactory.circleStrokeColor(Color.parseColor("#FFFFFF")),
-            PropertyFactory.circleStrokeWidth(1.0)
+            PropertyFactory.circleStrokeWidth(1.0.toFloat())
         )
         unclusterLayer.setFilter(Expression.not(Expression.has("point_count")))
         style.addLayer(unclusterLayer)
@@ -1918,13 +1917,12 @@ export function addHeatmap(points: Array<HeatmapItem>, options?: HeatmapOptions)
         }
         const source = new GeoJsonSource("tdt-heatmap-source", FeatureCollection.fromFeatures(features))
         style.addSource(source)
-        heatmapSourceRef = source
 
         const layer = new HeatmapLayer("tdt-heatmap-layer", "tdt-heatmap-source")
         layer.setProperties(
             PropertyFactory.heatmapWeight(Expression.get("weight")),
-            PropertyFactory.heatmapRadius((options?.radius ?? 30).toDouble()),
-            PropertyFactory.heatmapOpacity((options?.opacity ?? 0.6).toDouble())
+            PropertyFactory.heatmapRadius((options?.radius ?? 30).toFloat()),
+            PropertyFactory.heatmapOpacity((options?.opacity ?? 0.6).toFloat())
         )
         style.addLayer(layer)
         heatmapLayerRef = layer
@@ -1944,5 +1942,4 @@ export function removeHeatmap(): void {
         try { style.removeSource("tdt-heatmap-source") } catch (e: any) { /* ignore */ }
     }
     heatmapLayerRef = null
-    heatmapSourceRef = null
 }
