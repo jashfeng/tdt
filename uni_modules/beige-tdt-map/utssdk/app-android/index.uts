@@ -712,66 +712,50 @@ export function clearOverlays(): void {
     clearOverlayType('rectangle')
 }
 
-// 地图截图
-export function snapshot(): ArrayBuffer {
+// 地图截图（异步回调）
+// context7 验证：uni-app x 平台 UTS 函数默认在 main 线程执行（DCloud 官方文档
+// uts-for-android.html §2.4 线程环境差异），MapLibre snapshot 回调也在主线程执行
+// （渲染线程截图完成后 post 回主线程）——主线程同步等待（CountDownLatch.await）
+// 会阻塞消息循环导致回调永不执行（真机实测 5 秒超时死锁），
+// 因此改为异步：发起请求后立即返回，回调在主线程消息循环中执行，无阻塞、无死锁
+export function snapshot(callback: (data: ArrayBuffer) => void): void {
     const m = mapLibreMap
+    const errorCb = onErrorCallback
     if (m == null) {
-        const errorCb = onErrorCallback
         if (errorCb != null) {
             const errDetail: MapErrorDetail = { code: 4, message: "Map 未初始化" }
             errorCb(errDetail)
         }
-        return new ArrayBuffer(0)
+        callback(new ArrayBuffer(0))
+        return
     }
-    const errorCb = onErrorCallback
     try {
-        // context7 验证：snapshot 回调在主线程执行（ARCHITECTURE.md），CountDownLatch 阻塞主线程会导致死锁
-        // ⚠️ 调用方必须在子线程调用 snapshot()，否则 latch.await() 阻塞主线程 → 回调永远无法执行
-        let latch = new java.util.concurrent.CountDownLatch(1)
-        let resultBytes: ByteArray | null = null
-        let snapshotError: string | null = null
         m.snapshot((bitmap: android.graphics.Bitmap) => {
             try {
                 let stream = new java.io.ByteArrayOutputStream()
                 bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, stream)
-                resultBytes = stream.toByteArray()
+                const resultBytes = stream.toByteArray()
                 stream.close()
+                // ByteArray → ByteBuffer → ArrayBuffer（UTS 官方 API：ArrayBuffer.fromByteBuffer）
+                const byteBuffer = java.nio.ByteBuffer.wrap(resultBytes)
+                callback(ArrayBuffer.fromByteBuffer(byteBuffer))
             } catch (e: any) {
-                snapshotError = e.message ?? "snapshot 压缩失败"
+                console.error("TDTMap: snapshot 压缩失败: " + e.message)
+                if (errorCb != null) {
+                    const err: MapErrorDetail = { code: 4, message: "Snapshot 压缩失败: " + e.message }
+                    errorCb(err)
+                }
+                callback(new ArrayBuffer(0))
             }
-            latch.countDown()
         })
-        // 5 秒超时：防止主线程死锁无限等待，超时后返回空并报错
-        const ok = latch.await(5000, java.util.concurrent.TimeUnit.MILLISECONDS)
-        if (!ok) {
-            console.error("TDTMap: snapshot 超时（5秒），可能因主线程调用导致死锁")
-            if (errorCb != null) {
-                const err: MapErrorDetail = { code: 4, message: "Snapshot 超时：快照回调未在 5 秒内完成，请确保在子线程调用 snapshot()" }
-                errorCb(err)
-            }
-            return new ArrayBuffer(0)
-        }
-        if (snapshotError != null) {
-            console.error("TDTMap: snapshot 回调内异常: " + snapshotError)
-            if (errorCb != null) {
-                const err: MapErrorDetail = { code: 4, message: "Snapshot 回调失败: " + snapshotError }
-                errorCb(err)
-            }
-            return new ArrayBuffer(0)
-        }
-        if (resultBytes != null) {
-            // ByteArray → ByteBuffer → ArrayBuffer（UTS 官方 API：ArrayBuffer.fromByteBuffer）
-            const byteBuffer = java.nio.ByteBuffer.wrap(resultBytes)
-            return ArrayBuffer.fromByteBuffer(byteBuffer)
-        }
     } catch (e: any) {
         console.error("TDTMap: snapshot 失败: " + e.message)
         if (errorCb != null) {
             const errDetail: MapErrorDetail = { code: 4, message: "Snapshot 失败: " + e.message }
             errorCb(errDetail)
         }
+        callback(new ArrayBuffer(0))
     }
-    return new ArrayBuffer(0)
 }
 
 export function onResume(): void {

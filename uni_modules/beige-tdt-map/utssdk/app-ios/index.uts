@@ -647,12 +647,13 @@ export function switchMapType(mapType: string): void {
     }
 }
 
-export function snapshot(): ArrayBuffer {
+export function snapshot(callback: (data: ArrayBuffer) => void): void {
     if (mapView == null) {
         if (onErrorCallback != null) {
             onErrorCallback({ code: 4, message: "Map 未初始化" })
         }
-        return new ArrayBuffer(0)
+        callback(new ArrayBuffer(0))
+        return
     }
     try {
         const renderer = UIGraphicsImageRenderer(mapView.bounds.size)
@@ -664,14 +665,15 @@ export function snapshot(): ArrayBuffer {
         // UIImagePNGRepresentation → NSData → ArrayBuffer（UTS 官方 API：ArrayBuffer.fromData）
         const data = UIImagePNGRepresentation(image)
         if (data != null) {
-            return ArrayBuffer.fromData(data)
+            callback(ArrayBuffer.fromData(data))
+            return
         }
     } catch (e) {
         if (onErrorCallback != null) {
             onErrorCallback({ code: 4, message: "Snapshot 失败: " + e.toString() })
         }
     }
-    return new ArrayBuffer(0)
+    callback(new ArrayBuffer(0))
 }
 
 export function onResume(): void {

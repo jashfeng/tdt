@@ -87,7 +87,7 @@ export declare function clearMarkers(): void
 export declare function addPolygon(points: Array<MapClickDetail>, color: string, fillColor: string): number
 export declare function clearPolygons(): void
 export declare function switchMapType(mapType: string): void
-export declare function snapshot(): ArrayBuffer  // 返回地图截图 PNG 数据
+export declare function snapshot(callback: (data: ArrayBuffer) => void): void  // 异步截图：回调返回 PNG 数据；失败/平台不支持时回调空 ArrayBuffer 并触发 mapError
 export declare function onResume(): void
 export declare function onPause(): void
 export declare function destroyMap(): void

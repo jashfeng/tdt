@@ -760,12 +760,12 @@ export function clearOverlays(): void {
     })
 }
 
-export function snapshot(): ArrayBuffer {
-    // HarmonyOS MapKit 无快照 API，回调错误并返回空 ArrayBuffer（平台差异显式上报，禁止静默失败）
+export function snapshot(callback: (data: ArrayBuffer) => void): void {
+    // HarmonyOS MapKit 无快照 API，上报错误并回调空 ArrayBuffer（平台差异显式上报，禁止静默失败）
     if (onErrorCallback != null) {
         onErrorCallback({ code: 4, message: 'Snapshot not supported on HarmonyOS MapKit' })
     }
-    return new ArrayBuffer(0)
+    callback(new ArrayBuffer(0))
 }
 
 export function onResume(): void { /* MapKit 自动管理 */ }

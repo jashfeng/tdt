@@ -425,12 +425,13 @@ export function switchMapType(mapType: string): void {
     }
 }
 
-export function snapshot(): ArrayBuffer {
+export function snapshot(callback: (data: ArrayBuffer) => void): void {
     if (mapInstance == null) {
         if (mapErrorCallback != null) {
             mapErrorCallback({ code: 4, message: '地图未初始化' })
         }
-        return new ArrayBuffer(0)
+        callback(new ArrayBuffer(0))
+        return
     }
     try {
         const canvas = mapInstance.getCanvas()
@@ -442,10 +443,10 @@ export function snapshot(): ArrayBuffer {
         for (let i = 0; i < binaryStr.length; i++) {
             bytes[i] = binaryStr.charCodeAt(i)
         }
-        return bytes.buffer as ArrayBuffer
+        callback(bytes.buffer as ArrayBuffer)
     } catch (e: any) {
         console.error('TDTMap Web: snapshot 失败', e)
-        return new ArrayBuffer(0)
+        callback(new ArrayBuffer(0))
     }
 }
 

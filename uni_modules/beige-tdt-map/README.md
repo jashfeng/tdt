@@ -323,7 +323,7 @@ mapRef.value?.removeOverlayById(markerId)
 
 | 方法 | 返回值 | 说明 |
 |------|--------|------|
-| `takeSnapshot()` | `ArrayBuffer` | PNG 截图数据 |
+| `takeSnapshot(callback)` | `void` | 异步截图，回调返回 PNG ArrayBuffer 数据 |
 | `showCenter()` | 显示到 infoText | 当前中心坐标 |
 | `showZoom()` | 显示到 infoText | 当前缩放级别 |
 | `showBounds()` | 显示到 infoText | 当前视野范围 |
@@ -940,7 +940,7 @@ echo file_get_contents($url);
 A: 99% 是 Key 类型错误。请到 [天地图控制台](https://console.tianditu.gov.cn) 创建「服务端」或「Android 平台」类型 Key，不要使用浏览器端 Key。
 
 **Q: HarmonyOS 截图报错？**  
-A: 华为 MapKit 不支持 API 截图，`snapshot()` 返回空 `ArrayBuffer` 并回调错误。
+A: 华为 MapKit 不支持 API 截图，`snapshot(callback)` 回调空 `ArrayBuffer` 并上报错误。
 
 **Q: iOS 编译报 MLNMapView 找不到？**  
 A: 确保 `config.json` 或 `package.json` 中已声明 MapLibre iOS SDK 依赖。
