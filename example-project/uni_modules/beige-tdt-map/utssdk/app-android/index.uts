@@ -2,12 +2,13 @@ import { Context } from "android.content"
 import { MapLibre } from "org.maplibre.android"
 import { MapView, MapLibreMap, Style, MapLibreMapOptions } from "org.maplibre.android.maps"
 import { Property, PropertyFactory } from "org.maplibre.android.style.layers"
-// v1.7.0: 标记聚合 + 热力图（context7: maplibre-native issue #3519 验证包名与用法，
-// MapLibre Android 保留 com.mapbox.geojson 包名）
+// v1.7.0: 标记聚合 + 热力图（context7: maplibre-native issue #3519 验证包名与用法）
+// MapLibre 11.x 起 GeoJSON 类拆分到独立库 org.maplibre.gl:android-sdk-geojson（maplibre-java 仓库），
+// 包名从 com.mapbox.geojson 迁移为 org.maplibre.geojson（POM: android-sdk 11.x compile 依赖 android-sdk-geojson 6.0.1）
 import { Expression } from "org.maplibre.android.style.expressions"
 import { GeoJsonSource, GeoJsonOptions } from "org.maplibre.android.style.sources"
 import { CircleLayer, SymbolLayer, HeatmapLayer } from "org.maplibre.android.style.layers"
-import { FeatureCollection, Feature, Point } from "com.mapbox.geojson"
+import { FeatureCollection, Feature, Point } from "org.maplibre.geojson"
 import { JsonObject } from "com.google.gson"
 import { CameraPosition, CameraUpdateFactory } from "org.maplibre.android.camera"
 import { LatLng } from "org.maplibre.android.geometry"
@@ -253,15 +254,21 @@ export function initMap(
             const clusterSrc = clusterSourceRef
             if (clusterSrc != null) {
                 const screenPt = map.getProjection().toScreenLocation(point)
-                const hitFeatures = map.queryRenderedFeatures(screenPt, "tdt-cluster-layer")
-                if (hitFeatures != null && hitFeatures.length > 0) {
-                    const hit = hitFeatures[0]
-                    if (hit.getBooleanProperty("cluster")) {
-                        const zoom = clusterSrc.getClusterExpansionZoom(hit)
-                        // 与 zoomIn/panTo 一致改用 moveCamera 瞬时放大：v1.5.5 实测 animateCamera
-                        // 动画在 UTS 集成下不推进（500ms 零进展），点击聚合簇将无任何响应
-                        map.moveCamera(CameraUpdateFactory.newLatLngZoom(point, zoom.toDouble()))
-                        return true  // 聚合点击消费事件：放大展开，不触发 mapClick
+                // queryRenderedFeatures 返回 kotlin.collections.List<Feature>（平台专有数组类型），
+                // UTS 直接 .length 会生成非法 Kotlin（云打包报 Unresolved reference 'length'）——
+                // context7: UTS 官方文档 data-type.html，先 Array.fromNative 转 UTS Array 再操作
+                const hitRaw = map.queryRenderedFeatures(screenPt, "tdt-cluster-layer")
+                if (hitRaw != null) {
+                    const hitFeatures = Array.fromNative(hitRaw)
+                    if (hitFeatures.length > 0) {
+                        const hit = hitFeatures[0] as Feature
+                        if (hit.getBooleanProperty("cluster")) {
+                            const zoom = clusterSrc.getClusterExpansionZoom(hit)
+                            // 与 zoomIn/panTo 一致改用 moveCamera 瞬时放大：v1.5.5 实测 animateCamera
+                            // 动画在 UTS 集成下不推进（500ms 零进展），点击聚合簇将无任何响应
+                            map.moveCamera(CameraUpdateFactory.newLatLngZoom(point, zoom.toDouble()))
+                            return true  // 聚合点击消费事件：放大展开，不触发 mapClick
+                        }
                     }
                 }
             }
@@ -1830,12 +1837,15 @@ function buildPointFeatures(points: Array<MapClickDetail>): FeatureCollection {
 }
 
 // removeSource 统一传字符串 ID（Style.removeSource(String) 与 removeSource(Source) 重载均存在，
-// 传 ID 最简且规避 UTS 重载解析歧义）
+// 传 ID 最简且规避 UTS 重载解析歧义；removeLayer 同理，且图层 ID 固定，无需引用联合类型对象）
 function removeClusterInternal(): void {
     const style = mapLibreMap?.getStyle()
     if (style != null) {
-        for (let i = 0; i < clusterLayerRefs.length; i++) {
-            try { style.removeLayer(clusterLayerRefs[i]) } catch (e: any) { /* ignore */ }
+        const ids: Array<string> = ["tdt-cluster-layer", "tdt-cluster-count", "tdt-cluster-unclustered"]
+        for (let i = 0; i < ids.length; i++) {
+            if (style.getLayer(ids[i]) != null) {
+                try { style.removeLayer(ids[i]) } catch (e: any) { /* ignore */ }
+            }
         }
         try { style.removeSource("tdt-cluster-source") } catch (e: any) { /* ignore */ }
     }
@@ -1958,8 +1968,10 @@ export function addHeatmap(points: Array<HeatmapItem>, options?: HeatmapOptions)
 export function removeHeatmap(): void {
     const style = mapLibreMap?.getStyle()
     if (style != null) {
-        if (heatmapLayerRef != null) {
-            try { style.removeLayer(heatmapLayerRef) } catch (e: any) { /* ignore */ }
+        // 局部变量承接：heatmapLayerRef 为模块级可变属性，直接传参触发 Kotlin smart cast 编译错误
+        const hl = heatmapLayerRef
+        if (hl != null) {
+            try { style.removeLayer(hl) } catch (e: any) { /* ignore */ }
         }
         try { style.removeSource("tdt-heatmap-source") } catch (e: any) { /* ignore */ }
     }
