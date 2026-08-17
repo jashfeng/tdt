@@ -495,14 +495,17 @@ async function testViewport() {
     map.jumpTo({ center: [116.41, 39.91], zoom: 11 }); // jumpTo 无动画，避免与后续 zoomIn 动画互踩
     const c = map.getCenter();
     record('setCenter/getCenter', Math.abs(c.lat - 39.91) < 0.01 && Math.abs(c.lng - 116.41) < 0.01, c.lat + ',' + c.lng);
-    map.zoomIn(); map.zoomIn(); map.zoomOut();
-    // zoomIn/zoomOut 为动画，等 zoomend 完成后再断言（双保险超时 4s）
-    await new Promise((res) => {
+    // zoomIn/zoomOut 为动画；同一同步块内连续调用会互相打断（后一个 easeTo 覆盖前一个目标），
+    // 且都基于调用瞬间的 zoom 计算，最终只执行最后一个 zoomOut（11→10）。必须逐个等 zoomend 再调下一个。
+    const waitZoomEnd = () => new Promise((res) => {
       let done = false;
       const fin = () => { if (!done) { done = true; res(); } };
       map.once('zoomend', fin);
       setTimeout(fin, 4000);
     });
+    map.zoomIn(); await waitZoomEnd();
+    map.zoomIn(); await waitZoomEnd();
+    map.zoomOut(); await waitZoomEnd();
     record('zoomIn/zoomOut', map.getZoom() > 11.5, 'zoom=' + map.getZoom().toFixed(1));
     map.setMinZoom(3); map.setMaxZoom(17);
     record('setMinZoom/setMaxZoom', map.getMinZoom() === 3 && map.getMaxZoom() === 17);
@@ -772,12 +775,21 @@ function removeHeatmapPoc() {
 
 async function testCluster() {
   try {
+    // 复位 testViewport 里设置的 setMaxBounds：未清除时 jumpTo 上海会被钳制回北京范围，
+    // 300 个上海点全在屏幕外，视口内查询恒为空 → 簇=0
+    map.setMaxBounds(null);
     map.jumpTo({ center: [121.4737, 31.2304], zoom: 13 });
     await new Promise(r => setTimeout(r, 800));
     // span=0.04（约 4.4km 见方）：zoom 13 下 clusterRadius 50px≈1.9km，300 点必然成簇；
     // 默认 ±0.5（约 55km）密度过低不会聚合，属测试数据设计问题
     addMarkerClusterPoc(generatePoints(300, false, 0.04), { clusterRadius: 50, clusterMaxZoom: 14 });
-    await new Promise(r => setTimeout(r, 1500));
+    // 聚类在 MapLibre worker 中异步计算，固定延时不可靠（worker 冷启动/标签页节流会拉长），
+    // 轮询等待簇数据就绪（最多 10s）
+    const t1 = Date.now();
+    while (Date.now() - t1 < 10000) {
+      if (map.querySourceFeatures('tdt-cluster-source', { filter: ['has', 'point_count'] }).length > 0) break;
+      await new Promise(r => setTimeout(r, 300));
+    }
     const src = map.getSource('tdt-cluster-source');
     const clusterFeatures = map.querySourceFeatures('tdt-cluster-source', { filter: ['has', 'point_count'] });
     record('addMarkerCluster', src != null && clusterFeatures.length > 0, '聚合簇数量=' + clusterFeatures.length + '/300 点');
