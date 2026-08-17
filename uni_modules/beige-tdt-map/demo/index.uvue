@@ -199,6 +199,8 @@ function onMarkerTap(detail: MapClickDetail): void {
 
 function onMapError(err: MapErrorDetail): void {
   console.error('TDTMap Demo: 错误 [' + err.code + ']', err.message)
+  // v1.8.0: 平台不支持（code=5）回显到面板，避免"已叠加"等成功文案误导
+  if (err.code == 5) infoText.value = '当前平台不支持: ' + err.message
 }
 
 // ── v1.4.0 新增：长按事件 ──
@@ -631,7 +633,8 @@ function demoWms(): void {
 }
 
 function demoCanvas(): void {
-  infoText.value = 'isSupportCanvas = ' + (mapRef.value?.isSupportCanvas() ? 'true' : 'false') + '（当前平台）'
+  if (mapRef.value == null) { infoText.value = '地图尚未就绪'; return }
+  infoText.value = 'isSupportCanvas = ' + (mapRef.value.isSupportCanvas() ? 'true' : 'false') + '（当前平台）'
 }
 
 function demoClearBounds(): void {
