@@ -102,7 +102,8 @@ export declare function centerAndZoom(lat: number, lng: number, zoom: number): v
 // 手势控制
 export declare function enableZoom(enabled: boolean): void
 export declare function enableDrag(enabled: boolean): void
-// 范围限制（v1.8.0: 任一参数传 null 清除范围限制）
+// 范围限制（v1.8.0: 任一参数传 null 清除范围限制；Android/Web 支持清除，
+// iOS 端 setVisibleCoordinateBounds 为一次性限制无持久状态，null 清除为 no-op）
 export declare function setMaxBounds(minLat: number | null, minLng: number | null, maxLat: number | null, maxLng: number | null): void
 // 信息获取
 export declare function getBounds(): MapBoundsDetail
