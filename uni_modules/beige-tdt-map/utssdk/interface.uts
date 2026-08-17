@@ -19,7 +19,7 @@ export type MapClickDetail = {
 }
 
 export type MapErrorDetail = {
-    code: number       // 错误码：1=Key无效, 2=网络错误, 3=瓦片加载失败, 4=未知错误
+    code: number       // 错误码：1=Key无效, 2=网络错误, 3=瓦片加载失败, 4=未知错误, 5=平台不支持
     message: string
 }
 
@@ -102,8 +102,8 @@ export declare function centerAndZoom(lat: number, lng: number, zoom: number): v
 // 手势控制
 export declare function enableZoom(enabled: boolean): void
 export declare function enableDrag(enabled: boolean): void
-// 范围限制
-export declare function setMaxBounds(minLat: number, minLng: number, maxLat: number, maxLng: number): void
+// 范围限制（v1.8.0: 任一参数传 null 清除范围限制）
+export declare function setMaxBounds(minLat: number | null, minLng: number | null, maxLat: number | null, maxLng: number | null): void
 // 信息获取
 export declare function getBounds(): MapBoundsDetail
 // 坐标转换：GCJ02 → WGS84（高德/腾讯坐标 → 天地图可用坐标，中国境外坐标直接返回原值）
@@ -148,8 +148,8 @@ export declare function showMarkerInfo(id: number): void
 export declare function hideMarkerInfo(id: number): void
 
 // ═══ v1.3.0 新增：自定义瓦片图层 ═══
-// 添加自定义 XYZ 瓦片图层（如天气、交通、专题图），tileUrl 需包含 {x}{y}{z} 占位符
-export declare function addCustomTileLayer(id: string, tileUrl: string): void
+// 添加自定义 XYZ 瓦片图层（如天气、交通、专题图），tileUrl 需包含 {x}{y}{z} 占位符；options 可选，缺省与 v1.7.x 行为一致
+export declare function addCustomTileLayer(id: string, tileUrl: string, options?: TileLayerOptions): void
 // 移除指定 ID 的自定义瓦片图层
 export declare function removeCustomTileLayer(id: string): void
 
@@ -205,3 +205,33 @@ export declare function removeMarkerCluster(): void
 export declare function addHeatmap(points: Array<HeatmapItem>, options?: HeatmapOptions): void
 // 移除热力层
 export declare function removeHeatmap(): void
+
+// ═══════════════════════════════════════════════════════════
+// v1.8.0 新增：图层增强
+// ═══════════════════════════════════════════════════════════
+
+// 瓦片图层选项（自定义瓦片/WMS 共用，全部可选）
+// zIndex：仅支持 0（插到底图注记层之下）与 undefined（默认追加最上层）
+// opacity：0~1 透明度（默认 1）
+// minZoom/maxZoom：图层显示缩放范围（默认 1~18）
+export type TileLayerOptions = {
+    zIndex?: number
+    opacity?: number
+    minZoom?: number
+    maxZoom?: number
+}
+
+// 运行时替换地图样式（MapLibre Style Spec JSON，须含 version 字段）
+// Android/iOS/Web：切换后自动重建此前添加的用户图层（自定义瓦片/WMS/聚合/热力），天底图由样式自带
+// 鸿蒙：华为样式 schema 不兼容，通过 onError 上报 code=5
+export declare function setStyle(styleJson: string): void
+
+// 还原天地图默认样式（恢复底图并重建用户图层）；未调用过 setStyle 时为幂等 no-op
+export declare function removeStyle(): void
+
+// 叠加 WMS 服务图层（自动拼装 GetMap 请求模板；移除仍用 removeCustomTileLayer(id)）
+// Android/iOS/Web 支持；鸿蒙 TileOverlay 不支持 bbox 寻址，上报 code=5
+export declare function addWMSTileLayer(id: string, wmsUrl: string, layers: string, options?: TileLayerOptions): void
+
+// 当前平台是否支持 canvas 标注（Web=true；Android/iOS/鸿蒙=false）
+export declare function isSupportCanvas(): boolean
