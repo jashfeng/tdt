@@ -628,7 +628,8 @@ function demoRemoveStyle(): void {
 }
 
 function demoWms(): void {
-  mapRef.value?.addWMSTileLayer('wms-demo', 'https://demo.pygeoapi.io/master/wms', 'world', { opacity: 0.8, zIndex: 0 })
+  // Terrestris 公共 OSM WMS（无需 Key，EPSG:3857，实测可用）
+  mapRef.value?.addWMSTileLayer('wms-demo', 'https://ows.terrestris.de/osm/service', 'OSM-WMS', { opacity: 0.8, zIndex: 0 })
   infoText.value = 'WMS 图层已叠加（opacity=0.8, 贴底）'
 }
 

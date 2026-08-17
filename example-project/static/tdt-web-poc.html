@@ -1038,8 +1038,8 @@ function registerStyleLoadPoc(fn) {
 async function testV180Wms() {
   try {
     if (!map) { log('请先加载地图', 'fail'); return; }
-    const url = buildWmsTileUrlPoc('https://demo.pygeoapi.io/master/wms', 'world');
-    record('v1.8.0 WMS URL 模板', url.indexOf('{bbox-epsg-3857}') >= 0 && url.indexOf('SRS=EPSG:3857') >= 0 && url.indexOf('LAYERS=world') >= 0, url.substring(0, 70) + '...');
+    const url = buildWmsTileUrlPoc('https://ows.terrestris.de/osm/service', 'OSM-WMS');
+    record('v1.8.0 WMS URL 模板', url.indexOf('{bbox-epsg-3857}') >= 0 && url.indexOf('SRS=EPSG:3857') >= 0 && url.indexOf('LAYERS=OSM-WMS') >= 0, url.substring(0, 70) + '...');
     addCustomTilePoc('wms-poc', url, { opacity: 0.8, zIndex: 0, minZoom: 3, maxZoom: 15 });
     await new Promise(r => setTimeout(r, 1500));
     record('v1.8.0 addWMSTileLayer', map.getLayer('custom-tile-layer-wms-poc') != null);

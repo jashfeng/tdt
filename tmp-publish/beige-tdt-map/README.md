@@ -286,7 +286,7 @@ mapRef.value?.removeHeatmap()
 | 方法 | 参数 | 说明 |
 |------|------|------|
 | `setStyle(styleJson)` | MapLibre Style Spec JSON | 运行时替换地图样式（须含 `version` 字段，否则报 code=4 不切换）。切换后自动重建此前添加的用户图层（自定义瓦片/WMS/聚合/热力）；天底图由自定义样式自带，插件不自动加回。鸿蒙上报 code=5 |
-| `removeStyle()` | 无 | 还原天地图默认底图并重建用户图层；未调用过 setStyle 时幂等 no-op |
+| `removeStyle()` | 无 | 还原天地图默认底图并重建用户图层；未调用过 setStyle 时调用不产生可见变化（幂等） |
 | `addWMSTileLayer(id, wmsUrl, layers, options?)` | WMS 服务参数 | 叠加 WMS 图层（自动拼装 GetMap 请求；移除仍用 `removeTileLayer(id)`）。Android/iOS/Web 支持；鸿蒙上报 code=5 |
 | `isSupportCanvas()` | 无 | 当前平台是否支持 canvas 标注（Web=true；Android/iOS/鸿蒙=false） |
 
@@ -302,14 +302,15 @@ mapRef.value?.setStyle(JSON.stringify({
 // 还原天地图底图（用户图层自动重建）
 mapRef.value?.removeStyle()
 
-// WMS 叠加（贴底 + 80% 不透明度）
-mapRef.value?.addWMSTileLayer('wms-demo', 'https://demo.pygeoapi.io/master/wms', 'world', { opacity: 0.8, zIndex: 0 })
+// WMS 叠加（贴底 + 80% 不透明度；Terrestris 公共 OSM WMS，实测可用）
+mapRef.value?.addWMSTileLayer('wms-demo', 'https://ows.terrestris.de/osm/service', 'OSM-WMS', { opacity: 0.8, zIndex: 0 })
 
 // 清除边界限制
 mapRef.value?.setMapMaxBounds(null, null, null, null)
 ```
 
 > ⚠️ 平台差异：鸿蒙 MapKit 的样式 schema 与 MapLibre style spec 不兼容，`setStyle`/`addWMSTileLayer` 会通过 `mapError` 事件上报 code=5（平台不支持），`isSupportCanvas` 返回 false。
+> ⚠️ 鸿蒙 `addTileLayer` 的 options 仅 opacity（transparency）生效，minZoom/maxZoom/zIndex 忽略并 warn。
 > `zIndex` 仅支持 `0`（插到底图注记层之下）与缺省（默认置顶），其他值忽略并 warn。
 
 ### 覆盖物
