@@ -1201,17 +1201,20 @@ function rebuildUserLayersAfterStyle(): void {
     }
 }
 
-// v1.8.0: style.load 监听注册（保证任意时刻只有一个待触发监听，
+// v1.8.0: 样式完成监听注册（保证任意时刻只有一个待触发监听，
 // 防止快速连续 setStyle/removeStyle 时多个 once 监听同时触发导致重复重建、状态与地图脱节）
+// context7 修正：MapLibre GL JS 的 map 事件列表不存在 'style.load'（那是 Style 对象私有事件），
+// setStyle 换样式完成后触发的是 'styledata'（官方文档：Fired whenever the map's style changes）。
+// 浏览器实测：setStyle 后事件序列仅 styledata（POC v1.8.0 实测发现 'style.load' 永不触发）
 let styleLoadHandler: (() => void) | null = null
 
 function registerStyleLoadHandler(fn: () => void): void {
     if (mapInstance == null) return
     if (styleLoadHandler != null) {
-        mapInstance.off('style.load', styleLoadHandler)
+        mapInstance.off('styledata', styleLoadHandler)
     }
     styleLoadHandler = fn
-    mapInstance.once('style.load', styleLoadHandler)
+    mapInstance.once('styledata', styleLoadHandler)
 }
 
 export function setStyle(styleJson: string): void {

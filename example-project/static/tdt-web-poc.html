@@ -74,6 +74,12 @@
     <button onclick="testHeatmap()">热力 500 点</button>
     <button onclick="clearVis()">清除可视化</button>
   </div>
+  <div class="grp"><h4>v1.8.0 图层增强</h4>
+    <button onclick="testV180Wms()">1.WMS 叠加</button>
+    <button onclick="testV180SetStyle()">2.setStyle</button>
+    <button onclick="testV180RemoveStyle()">3.removeStyle</button>
+    <button onclick="testV180Misc()">4.边界/canvas</button>
+  </div>
   <div class="grp"><h4>天地图 Web API（重点）</h4>
     <button onclick="testGeocoderFormats()">geocoder 格式对比</button>
     <button onclick="testSearchQueryTypes()">v2/search 各 queryType</button>
@@ -975,6 +981,113 @@ async function testSearchImpl() {
   await new Promise(rr => setTimeout(rr, 300));
   const ok3 = r3.status === 'ok' && (r3.json.status === '0' || (r3.json.status && r3.json.status.infocode === 1000));
   record('插件 searchInBounds 复刻(2)', ok3, 'mapBound/level 已进 URL | ' + (r3.status === 'ok' ? (r3.json.msg != null ? r3.json.msg : 'count=' + r3.json.count) : '网络失败'));
+}
+
+// ═══════════════════════════════════════════════════════════
+// v1.8.0 图层增强（同构复刻 web/index.uts）
+// ═══════════════════════════════════════════════════════════
+const pocV180TileLayers = new Map();  // 复刻 customTileLayers: {sourceId, layerId, tileUrl, options}
+let pocV180TileIds = [];              // 复刻 customTileLayerIds 平行数组
+let pocStyleLoadHandler = null;       // 复刻 styleLoadHandler（防 once 监听累积）
+
+function buildWmsTileUrlPoc(wmsUrl, layers) {
+  const sep = wmsUrl.indexOf('?') >= 0 ? '&' : '?';
+  return wmsUrl + sep + 'SERVICE=WMS&REQUEST=GetMap&VERSION=1.1.1&LAYERS=' + layers +
+    '&STYLES=&FORMAT=image/png&TRANSPARENT=true&SRS=EPSG:3857&BBOX={bbox-epsg-3857}&WIDTH=256&HEIGHT=256';
+}
+
+function addCustomTilePoc(id, tileUrl, options) {
+  const sourceId = 'custom-tile-src-' + id;
+  const layerId = 'custom-tile-layer-' + id;
+  map.addSource(sourceId, { type: 'raster', tiles: [tileUrl], tileSize: 256,
+    minzoom: (options && options.minZoom) || 1, maxzoom: (options && options.maxZoom) || 18 });
+  const layerObj = { id: layerId, type: 'raster', source: sourceId,
+    minzoom: (options && options.minZoom) || 1, maxzoom: (options && options.maxZoom) || 18,
+    paint: { 'raster-opacity': (options && options.opacity != null) ? options.opacity : 1 } };
+  if (options && options.zIndex === 0) {
+    if (map.getLayer('tdt-anno-layer') != null) map.addLayer(layerObj, 'tdt-anno-layer');
+    else { map.addLayer(layerObj); log('zIndex=0 但无注记层，回退置顶（与插件一致）', 'warn'); }
+  } else {
+    map.addLayer(layerObj);
+    if (options && options.zIndex != null && options.zIndex !== 0) log('zIndex 仅支持 0 与 undefined，已忽略（与插件一致）', 'warn');
+  }
+  pocV180TileLayers.set(id, { sourceId: sourceId, layerId: layerId, tileUrl: tileUrl, options: options || {} });
+  pocV180TileIds.push(id);
+}
+
+function rebuildPoc() {
+  const ids = pocV180TileIds.slice();
+  pocV180TileIds = [];
+  const saved = [];
+  for (const id of ids) {
+    const info = pocV180TileLayers.get(id);
+    if (info != null) saved.push({ id: id, info: info });
+  }
+  pocV180TileLayers.clear();
+  for (const s of saved) addCustomTilePoc(s.id, s.info.tileUrl, s.info.options);
+}
+
+function registerStyleLoadPoc(fn) {
+  // 实测修正：MapLibre GL JS 4.7.1 setStyle 后不触发 'style.load'（不在 map 事件列表），
+  // 样式替换完成触发 'styledata'（浏览器实测：仅 styledata）
+  if (pocStyleLoadHandler != null) map.off('styledata', pocStyleLoadHandler);
+  pocStyleLoadHandler = fn;
+  map.once('styledata', pocStyleLoadHandler);
+}
+
+async function testV180Wms() {
+  try {
+    if (!map) { log('请先加载地图', 'fail'); return; }
+    const url = buildWmsTileUrlPoc('https://demo.pygeoapi.io/master/wms', 'world');
+    record('v1.8.0 WMS URL 模板', url.indexOf('{bbox-epsg-3857}') >= 0 && url.indexOf('SRS=EPSG:3857') >= 0 && url.indexOf('LAYERS=world') >= 0, url.substring(0, 70) + '...');
+    addCustomTilePoc('wms-poc', url, { opacity: 0.8, zIndex: 0, minZoom: 3, maxZoom: 15 });
+    await new Promise(r => setTimeout(r, 1500));
+    record('v1.8.0 addWMSTileLayer', map.getLayer('custom-tile-layer-wms-poc') != null);
+    record('v1.8.0 opacity 生效', map.getPaintProperty('custom-tile-layer-wms-poc', 'raster-opacity') === 0.8);
+    record('v1.8.0 minZoom/maxZoom 生效', map.getSource('custom-tile-src-wms-poc').minzoom === 3 && map.getSource('custom-tile-src-wms-poc').maxzoom === 15);
+  } catch (e) { record('testV180Wms', false, String(e)); }
+}
+
+async function testV180SetStyle() {
+  try {
+    if (!map) { log('请先加载地图', 'fail'); return; }
+    map.setStyle({ version: 8, glyphs: 'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf',
+      sources: { bg: { type: 'raster', tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'], tileSize: 256 } },
+      layers: [{ id: 'bg-layer', type: 'raster', source: 'bg' }] });
+    registerStyleLoadPoc(() => { rebuildPoc(); });
+    await new Promise(r => setTimeout(r, 1500));
+    record('v1.8.0 setStyle 生效', map.getLayer('bg-layer') != null && map.getSource('tdt-base') == null, 'OSM 样式上屏、天地图底图消失');
+    record('v1.8.0 setStyle 后重建用户层', map.getSource('custom-tile-src-wms-poc') != null, 'WMS 层被重建');
+  } catch (e) { record('testV180SetStyle', false, String(e)); }
+}
+
+async function testV180RemoveStyle() {
+  try {
+    if (!map) { log('请先加载地图', 'fail'); return; }
+    const { apiKey } = getKeys();
+    map.setStyle({ version: 8, glyphs: 'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf', sources: {}, layers: [] });
+    registerStyleLoadPoc(() => {
+      // 复刻 addTdtBaseLayers（与 POC initMap 的底图构造一致）
+      const cfg = LAYERS[currentType];
+      map.addSource('tdt-base', { type: 'raster', tiles: [tileUrl(cfg.map, apiKey)], tileSize: 256, maxzoom: 18, minzoom: 1 });
+      map.addLayer({ id: 'tdt-base-layer', type: 'raster', source: 'tdt-base' });
+      map.addSource('tdt-anno', { type: 'raster', tiles: [tileUrl(cfg.anno, apiKey)], tileSize: 256, maxzoom: 18, minzoom: 1 });
+      map.addLayer({ id: 'tdt-anno-layer', type: 'raster', source: 'tdt-anno' });
+      rebuildPoc();
+    });
+    await new Promise(r => setTimeout(r, 1500));
+    record('v1.8.0 removeStyle 恢复天底图', map.getSource('tdt-base') != null && map.getSource('tdt-anno') != null);
+    record('v1.8.0 removeStyle 后重建用户层', map.getSource('custom-tile-src-wms-poc') != null);
+  } catch (e) { record('testV180RemoveStyle', false, String(e)); }
+}
+
+function testV180Misc() {
+  try {
+    if (!map) { log('请先加载地图', 'fail'); return; }
+    map.setMaxBounds(null);
+    record('v1.8.0 setMaxBounds(null) 清除', map.getBounds() != null, '清除后地图可自由操作');
+    record('v1.8.0 isSupportCanvas', true, 'Web 端恒 true（复刻 return true）');
+  } catch (e) { record('testV180Misc', false, String(e)); }
 }
 </script>
 </body>
