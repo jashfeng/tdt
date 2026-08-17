@@ -18,7 +18,7 @@ import { CLLocationCoordinate2DMake, CLLocationManager, CLLocation } from "CoreL
 import { UITapGestureRecognizer, UILongPressGestureRecognizer, UIColor, UIGraphicsImageRenderer, UIImagePNGRepresentation } from "UIKit"
 import { UIEdgeInsets } from "UIKit"
 import { NSURL, NSExpression, NSBundle, NSString } from "Foundation"
-import { TDMapOptions, MapClickDetail, MapBoundsDetail, MapErrorDetail, MapSizeDetail, MapViewportDetail, MapClickCallback, MapReadyCallback, MapErrorCallback, MarkerClickCallback, GeocodeCallback, SearchOptions, MapLongClickCallback, CameraChangeCallback, ClusterOptions, HeatmapItem, HeatmapOptions } from '../interface.uts'
+import { TDMapOptions, MapClickDetail, MapBoundsDetail, MapErrorDetail, MapSizeDetail, MapViewportDetail, MapClickCallback, MapReadyCallback, MapErrorCallback, MarkerClickCallback, GeocodeCallback, SearchOptions, MapLongClickCallback, CameraChangeCallback, ClusterOptions, HeatmapItem, HeatmapOptions, TileLayerOptions } from '../interface.uts'
 
 // ⚠️ 天地图 Key 类型说明（自新系统升级后严格区分，混用会导致瓦片不显示）:
 //   - "浏览器端" key：校验 Referer 头 + 域名白名单 → 原生 App 不发送浏览器 Referer → 403 被拒 → 灰白背景
@@ -116,17 +116,53 @@ class TDTMapDelegate implements MLNMapViewDelegate {
     // context7 验证：协议要求 ObjC selector 为 mapView:didFinishLoadingStyle:
     // UTS 中方法名 mapView + 参数名 didFinishLoadingStyle 生成正确 selector
     @objc mapView(mapView: MLNMapView, didFinishLoadingStyle: MLNStyle): void {
-        // 预创建所有图层对（vec/img/ter），非活跃图层设为不可见
-        addTiandituTileLayer(mapView, 'vec', this.opts.apiKey, this.opts.mapType == 'vec' ? 'visible' : 'none')
-        addTiandituTileLayer(mapView, 'img', this.opts.apiKey, this.opts.mapType == 'img' ? 'visible' : 'none')
-        addTiandituTileLayer(mapView, 'ter', this.opts.apiKey, this.opts.mapType == 'ter' ? 'visible' : 'none')
+        // v1.8.0: 三态拦截。初始路径（mode 0）与 v1.7.x 完全一致；
+        // mode 1 不重建天底图（防天地图瓦片盖住用户样式——若不拦截，setStyle 后
+        // 本回调会无条件加回天地图三层，用户自定义样式被底图覆盖，属真 bug）
+        if (styleRebuildMode == 0) {
+            // 预创建所有图层对（vec/img/ter），非活跃图层设为不可见
+            addTiandituTileLayer(mapView, 'vec', this.opts.apiKey, this.opts.mapType == 'vec' ? 'visible' : 'none')
+            addTiandituTileLayer(mapView, 'img', this.opts.apiKey, this.opts.mapType == 'img' ? 'visible' : 'none')
+            addTiandituTileLayer(mapView, 'ter', this.opts.apiKey, this.opts.mapType == 'ter' ? 'visible' : 'none')
 
-        // 设置初始视角（CLLocationCoordinate2D 是 C 结构体，必须用 Make 函数构造）
-        const center = CLLocationCoordinate2DMake(this.opts.latitude, this.opts.longitude)
-        mapView.setCenterCoordinate(center, this.opts.zoom, false)
+            // 设置初始视角（CLLocationCoordinate2D 是 C 结构体，必须用 Make 函数构造）
+            const center = CLLocationCoordinate2DMake(this.opts.latitude, this.opts.longitude)
+            mapView.setCenterCoordinate(center, this.opts.zoom, false)
 
-        if (onReadyCallback != null) {
-            onReadyCallback()
+            if (onReadyCallback != null) {
+                onReadyCallback()
+            }
+            return
+        }
+        if (styleRebuildMode == 2) {
+            // removeStyle：空样式已加载，重建天地图底图三层（仅当前类型可见）
+            addTiandituTileLayer(mapView, 'vec', currentApiKey, currentMapType == 'vec' ? 'visible' : 'none')
+            addTiandituTileLayer(mapView, 'img', currentApiKey, currentMapType == 'img' ? 'visible' : 'none')
+            addTiandituTileLayer(mapView, 'ter', currentApiKey, currentMapType == 'ter' ? 'visible' : 'none')
+        }
+        // mode 1/2 均重建用户数据层
+        rebuildUserLayersAfterStyle()
+        styleRebuildMode = 0
+    }
+
+    // v1.8.0 审查修复：样式加载失败回调（MGLMapViewDelegate 协议方法，selector 为
+    // mapView:didFailLoadingMapWithError:，与 didFinishLoadingStyle 同协议同源）。
+    // setStyle 的 styleJSON 赋值是异步解析，非法 JSON 不抛同步异常而是走到此回调；
+    // 若不回滚，styleRebuildMode 卡在 1 / customStyleActive 卡在 true（与 Android 端
+    // setStyle try/catch 回滚对称）。mode 2 失败（内联空样式，固定合法 JSON，理论不可达）
+    // 时恢复 customStyleActive = true，语义与 setStyle 失败相反
+    @objc mapView(mapView: MLNMapView, didFailLoadingMapWithError: any): void {
+        if (styleRebuildMode != 0) {
+            console.error("TDTMap: 样式切换失败: " + String(didFailLoadingMapWithError ?? ""))
+            if (styleRebuildMode == 1) {
+                customStyleActive = false
+            } else if (styleRebuildMode == 2) {
+                customStyleActive = true
+            }
+            styleRebuildMode = 0
+            if (onErrorCallback != null) {
+                onErrorCallback({ code: 4, message: "样式切换失败: " + String(didFailLoadingMapWithError ?? "") })
+            }
         }
     }
 
@@ -611,12 +647,13 @@ export function switchMapType(mapType: string): void {
     }
 }
 
-export function snapshot(): ArrayBuffer {
+export function snapshot(callback: (data: ArrayBuffer) => void): void {
     if (mapView == null) {
         if (onErrorCallback != null) {
             onErrorCallback({ code: 4, message: "Map 未初始化" })
         }
-        return new ArrayBuffer(0)
+        callback(new ArrayBuffer(0))
+        return
     }
     try {
         const renderer = UIGraphicsImageRenderer(mapView.bounds.size)
@@ -628,14 +665,15 @@ export function snapshot(): ArrayBuffer {
         // UIImagePNGRepresentation → NSData → ArrayBuffer（UTS 官方 API：ArrayBuffer.fromData）
         const data = UIImagePNGRepresentation(image)
         if (data != null) {
-            return ArrayBuffer.fromData(data)
+            callback(ArrayBuffer.fromData(data))
+            return
         }
     } catch (e) {
         if (onErrorCallback != null) {
             onErrorCallback({ code: 4, message: "Snapshot 失败: " + e.toString() })
         }
     }
-    return new ArrayBuffer(0)
+    callback(new ArrayBuffer(0))
 }
 
 export function onResume(): void {
@@ -681,6 +719,13 @@ export function destroyMap(): void {
             locationTimer = null
         }
         customTileSources.clear()
+        customTileLayerIds = []
+        customStyleActive = false
+        styleRebuildMode = 0
+        clusterDataRef = null
+        clusterOptionsRef = null
+        heatmapDataRef = null
+        heatmapOptionsRef = null
         if (delegate != null) {
             UTSiOS.destroyInstance(delegate)
         }
@@ -749,8 +794,14 @@ export function enableDrag(enabled: boolean): void {
 
 // ==================== 范围限制 ====================
 
-export function setMaxBounds(minLat: number, minLng: number, maxLat: number, maxLng: number): void {
+export function setMaxBounds(minLat: number | null, minLng: number | null, maxLat: number | null, maxLng: number | null): void {
     if (mapView == null) return
+    // v1.8.0: 可空签名。context7: MLN setVisibleCoordinateBounds 为一次性限制，无持久 cameraTargetBounds
+    // 状态；null 清除请求无对应 API，显式 no-op（与 Android 端 setLatLngBoundsForCameraTarget(null) 语义差异
+    // 在文档中说明，避免静默误用）
+    if (minLat == null || minLng == null || maxLat == null || maxLng == null) {
+        return
+    }
     console.warn("TDTMap: iOS setMaxBounds 为一次性限制（MapLibre iOS 无永久 cameraTargetBounds API），用户可继续平移缩放超出边界")
     const sw = CLLocationCoordinate2DMake(minLat, minLng)
     const ne = CLLocationCoordinate2DMake(maxLat, maxLng)
@@ -1257,10 +1308,20 @@ export function hideMarkerInfo(id: number): void {
 // ══════════════════════════════════════════════
 
 // context7 验证：MLNRasterTileSource 支持 URL 数组或 TileJSON，MLNRasterStyleLayer 绑定到 source
-type CustomTileEntry = { source: MLNRasterTileSource, layer: MLNRasterStyleLayer }
+type CustomTileEntry = { source: MLNRasterTileSource, layer: MLNRasterStyleLayer, tileUrl: string, options: TileLayerOptions }
 let customTileSources = new Map<string, CustomTileEntry>()
+// v1.8.0: 平行数组存 key 顺序（重建按添加顺序重放）
+let customTileLayerIds: Array<string> = []
+// v1.8.0: 聚合/热力数据快照（样式切换后重建）
+let clusterDataRef: Array<MapClickDetail> | null = null
+let clusterOptionsRef: ClusterOptions | null = null
+let heatmapDataRef: Array<HeatmapItem> | null = null
+let heatmapOptionsRef: HeatmapOptions | null = null
+// v1.8.0: 样式重建三态：0=初始加载 1=setStyle 后（只重建用户层） 2=removeStyle 后（重建天底图+用户层）
+let styleRebuildMode = 0
+let customStyleActive = false
 
-export function addCustomTileLayer(id: string, tileUrl: string): void {
+export function addCustomTileLayer(id: string, tileUrl: string, options?: TileLayerOptions): void {
     if (mapView == null || mapView.style == null) {
         if (onErrorCallback != null) {
             onErrorCallback({ code: 4, message: "样式未加载，无法添加瓦片图层" })
@@ -1276,8 +1337,36 @@ export function addCustomTileLayer(id: string, tileUrl: string): void {
         const layer = new MLNRasterStyleLayer(id + "-layer", source)
         layer.minimumZoomLevel = 1
         layer.maximumZoomLevel = 18
-        mapView.style?.addLayer(layer)
-        customTileSources.set(id, { source: source, layer: layer })
+        // v1.8.0: options 应用（MLN 官方属性；NSExpression 用法与现有聚合/热力层一致）
+        if (options != null) {
+            if (options.minZoom != null) {
+                layer.minimumZoomLevel = options.minZoom
+            }
+            if (options.maxZoom != null) {
+                layer.maximumZoomLevel = options.maxZoom
+            }
+            if (options.opacity != null) {
+                layer.rasterOpacity = NSExpression(forConstantValue: options.opacity)
+            }
+        }
+        if (options != null && options.zIndex == 0) {
+            // zIndex=0: 插到天地图注记层之下。context7: MGLStyle insertLayer:belowLayer: 官方 API
+            // （Mapbox iOS 6.3.0 API 参考确认）；注记层缺失时回退置顶并 warn（与 Android/Web 端一致）
+            const labelLayer = mapView.style?.layerWithIdentifier("tdt-label-" + currentMapType + "-layer")
+            if (labelLayer != null) {
+                mapView.style?.insertLayer(layer, below: labelLayer)
+            } else {
+                mapView.style?.addLayer(layer)
+                console.warn("TDTMap: 未找到注记层，zIndex=0 已按默认置顶处理")
+            }
+        } else {
+            mapView.style?.addLayer(layer)
+            if (options != null && options.zIndex != null && options.zIndex != 0) {
+                console.warn("TDTMap: zIndex 仅支持 0（贴底）与 undefined（置顶），当前值已忽略")
+            }
+        }
+        customTileSources.set(id, { source: source, layer: layer, tileUrl: tileUrl, options: options ?? {} })
+        customTileLayerIds.push(id)
     } catch (e: any) {
         console.error("TDTMap: addCustomTileLayer 失败: " + (e.message ?? String(e)))
         if (onErrorCallback != null) {
@@ -1298,6 +1387,94 @@ export function removeCustomTileLayer(id: string): void {
         }
     }
     customTileSources.delete(id)
+    // v1.8.0: 清理平行数组
+    const newIds: Array<string> = []
+    for (let i = 0; i < customTileLayerIds.length; i++) {
+        if (customTileLayerIds[i] != id) newIds.push(customTileLayerIds[i])
+    }
+    customTileLayerIds = newIds
+}
+
+// ══════════════════════════════════════════════
+// v1.8.0 新增：WMS / 样式切换 / canvas 探测（图层增强）
+// ══════════════════════════════════════════════
+
+// context7: {bbox-epsg-3857} 为 MapLibre style spec 标准占位符（天地图官方 WMS 接入文档确认）
+function buildWmsTileUrl(wmsUrl: string, layers: string): string {
+    const sep = wmsUrl.indexOf('?') >= 0 ? '&' : '?'
+    return wmsUrl + sep + 'SERVICE=WMS&REQUEST=GetMap&VERSION=1.1.1&LAYERS=' + layers +
+        '&STYLES=&FORMAT=image/png&TRANSPARENT=true&SRS=EPSG:3857&BBOX={bbox-epsg-3857}&WIDTH=256&HEIGHT=256'
+}
+
+export function addWMSTileLayer(id: string, wmsUrl: string, layers: string, options?: TileLayerOptions): void {
+    addCustomTileLayer(id, buildWmsTileUrl(wmsUrl, layers), options)
+}
+
+// v1.8.0: 样式切换后重建用户数据图层（按添加顺序重放）
+function rebuildUserLayersAfterStyle(): void {
+    // v1.8.0 审查修复：样式整体替换后，四个 ref 仍持有旧样式图层对象，对新样式执行
+    // removeLayer/removeSource 会抛异常（removeCustomTileLayer 的 try/catch 即为先例）；
+    // 重建前先置 null，旧对象随旧样式销毁自动释放，重放时 addMarkerCluster/addHeatmap
+    // 内部的 remove 调用走 null 分支跳过删除，避免未捕获异常中断重建
+    clusterSourceRef = null
+    clusterCircleLayerRef = null
+    heatmapLayerRef = null
+    heatmapSourceRef = null
+    const ids = customTileLayerIds.slice()
+    customTileLayerIds = []
+    const saved: Array<any> = []
+    for (let i = 0; i < ids.length; i++) {
+        const e = customTileSources.get(ids[i])
+        if (e != null) saved.push({ id: ids[i], entry: e })
+    }
+    customTileSources.clear()
+    for (let i = 0; i < saved.length; i++) {
+        addCustomTileLayer(saved[i].id, saved[i].entry.tileUrl, saved[i].entry.options)
+    }
+    if (clusterDataRef != null) {
+        const pts = clusterDataRef
+        const opts = clusterOptionsRef
+        clusterDataRef = null
+        clusterOptionsRef = null
+        addMarkerCluster(pts, opts)
+    }
+    if (heatmapDataRef != null) {
+        const pts = heatmapDataRef
+        const opts = heatmapOptionsRef
+        heatmapDataRef = null
+        heatmapOptionsRef = null
+        addHeatmap(pts, opts)
+    }
+}
+
+// context7: MLNMapView.h 官方源码——styleJSON 属性"Setting this property results in an asynchronous
+// style change"；赋值触发 didFinishLoadingStyle 回调（styleRebuildMode 三态在 delegate 中拦截）
+export function setStyle(styleJson: string): void {
+    if (mapView == null) return
+    // 前置校验：必须含 version 字段，防止解析失败导致地图空白
+    if (styleJson.indexOf('"version"') < 0) {
+        console.error("TDTMap: setStyle 拒绝：JSON 缺少 version 字段")
+        if (onErrorCallback != null) {
+            onErrorCallback({ code: 4, message: "setStyle 需为含 version 字段的 MapLibre Style Spec JSON" })
+        }
+        return
+    }
+    customStyleActive = true
+    styleRebuildMode = 1
+    mapView.styleJSON = styleJson
+}
+
+export function removeStyle(): void {
+    if (mapView == null) return
+    if (!customStyleActive) return
+    customStyleActive = false
+    styleRebuildMode = 2
+    // 内联空样式（与 getEmptyStyleURL 等价，无文件依赖）；加载完成后 delegate 重建天底图+用户层
+    mapView.styleJSON = '{"version":8,"sources":{},"layers":[]}'
+}
+
+export function isSupportCanvas(): boolean {
+    return false
 }
 
 // ══════════════════════════════════════════════
@@ -1410,6 +1587,9 @@ export function addMarkerCluster(points: Array<MapClickDetail>, options?: Cluste
         layer.circleStrokeWidth = NSExpression(forConstantValue: 1.0)
         mapView.style?.addLayer(layer)
         clusterCircleLayerRef = layer
+        // v1.8.0: 成功路径快照（样式切换后由 rebuildUserLayersAfterStyle 重放）
+        clusterDataRef = points
+        clusterOptionsRef = options ?? null
     } catch (e) {
         console.error("TDTMap: 添加聚合图层失败: " + e.toString())
         if (onErrorCallback != null) onErrorCallback({ code: 4, message: "添加聚合图层失败: " + e.toString() })
@@ -1418,16 +1598,27 @@ export function addMarkerCluster(points: Array<MapClickDetail>, options?: Cluste
 }
 
 export function removeMarkerCluster(): void {
+    // v1.8.0: 清除数据快照
+    clusterDataRef = null
+    clusterOptionsRef = null
     if (mapView == null || mapView.style == null) {
         clusterSourceRef = null
         clusterCircleLayerRef = null
         return
     }
     if (clusterCircleLayerRef != null) {
-        mapView.style?.removeLayer(clusterCircleLayerRef)
+        try {
+            mapView.style?.removeLayer(clusterCircleLayerRef)
+        } catch (e: any) {
+            console.error("TDTMap: removeMarkerCluster 图层移除失败: " + (e.message ?? String(e)))
+        }
     }
     if (clusterSourceRef != null) {
-        mapView.style?.removeSource(clusterSourceRef)
+        try {
+            mapView.style?.removeSource(clusterSourceRef)
+        } catch (e: any) {
+            console.error("TDTMap: removeMarkerCluster source 移除失败: " + (e.message ?? String(e)))
+        }
     }
     clusterCircleLayerRef = null
     clusterSourceRef = null
@@ -1463,6 +1654,9 @@ export function addHeatmap(points: Array<HeatmapItem>, options?: HeatmapOptions)
         layer.heatmapOpacity = NSExpression(forConstantValue: (options?.opacity ?? 0.6) as number)
         mapView.style?.addLayer(layer)
         heatmapLayerRef = layer
+        // v1.8.0: 成功路径快照（样式切换后由 rebuildUserLayersAfterStyle 重放）
+        heatmapDataRef = points
+        heatmapOptionsRef = options ?? null
     } catch (e) {
         console.error("TDTMap: 添加热力图层失败: " + e.toString())
         if (onErrorCallback != null) onErrorCallback({ code: 4, message: "添加热力图层失败: " + e.toString() })
@@ -1471,12 +1665,23 @@ export function addHeatmap(points: Array<HeatmapItem>, options?: HeatmapOptions)
 }
 
 export function removeHeatmap(): void {
+    // v1.8.0: 清除数据快照
+    heatmapDataRef = null
+    heatmapOptionsRef = null
     if (mapView != null && mapView.style != null) {
         if (heatmapLayerRef != null) {
-            mapView.style?.removeLayer(heatmapLayerRef)
+            try {
+                mapView.style?.removeLayer(heatmapLayerRef)
+            } catch (e: any) {
+                console.error("TDTMap: removeHeatmap 图层移除失败: " + (e.message ?? String(e)))
+            }
         }
         if (heatmapSourceRef != null) {
-            mapView.style?.removeSource(heatmapSourceRef)
+            try {
+                mapView.style?.removeSource(heatmapSourceRef)
+            } catch (e: any) {
+                console.error("TDTMap: removeHeatmap source 移除失败: " + (e.message ?? String(e)))
+            }
         }
     }
     heatmapLayerRef = null

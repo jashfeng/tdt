@@ -176,7 +176,7 @@ mapRef.value?.方法名(...)
 | `centerAtZoom(lat, lng, zoom)` | 坐标+缩放 | 居中并缩放 |
 | `setZoomEnabled(bool)` | 布尔 | 缩放手势开关 |
 | `setDragEnabled(bool)` | 布尔 | 拖拽手势开关 |
-| `setMapMaxBounds(minLat, minLng, maxLat, maxLng)` | 边界 | 设置视野边界 |
+| `setMapMaxBounds(minLat, minLng, maxLat, maxLng)` | 边界 | 设置视野边界（v1.8.0: 任一参数传 null 清除限制） |
 | **🆕** `doCheckResize()` | 无 | 触发布局刷新 |
 | **🆕** `doPlanBy(x, y)` | 像素偏移 | 像素级平移 |
 | **🆕** `setViewportPoints(points)` | 坐标数组 | 多点自适应视野 |
@@ -217,7 +217,7 @@ uvue 层自定义气泡（MapLibre 11.x 原生 InfoWindow 在 native-view 集成
 
 | 方法 | 说明 |
 |------|------|
-| `addTileLayer(id, tileUrl)` | 添加 XYZ 瓦片图层 |
+| `addTileLayer(id, tileUrl, options?)` | 添加 XYZ 瓦片图层（v1.8.0: options 为 `{ opacity?, minZoom?, maxZoom?, zIndex? }`，zIndex 仅支持 0 与缺省） |
 | `removeTileLayer(id)` | 移除指定瓦片图层 |
 
 ### 🧩 内置 UI 工具（v1.5.0 / v1.5.6）
@@ -280,6 +280,37 @@ mapRef.value?.removeMarkerCluster()
 mapRef.value?.addHeatmap(heatPoints, { radius: 30, opacity: 0.6 })
 mapRef.value?.removeHeatmap()
 ```
+
+### 🎨 图层增强（v1.8.0 新增）
+
+| 方法 | 参数 | 说明 |
+|------|------|------|
+| `setStyle(styleJson)` | MapLibre Style Spec JSON | 运行时替换地图样式（须含 `version` 字段，否则报 code=4 不切换）。切换后自动重建此前添加的用户图层（自定义瓦片/WMS/聚合/热力）；天底图由自定义样式自带，插件不自动加回。鸿蒙上报 code=5 |
+| `removeStyle()` | 无 | 还原天地图默认底图并重建用户图层；未调用过 setStyle 时幂等 no-op |
+| `addWMSTileLayer(id, wmsUrl, layers, options?)` | WMS 服务参数 | 叠加 WMS 图层（自动拼装 GetMap 请求；移除仍用 `removeTileLayer(id)`）。Android/iOS/Web 支持；鸿蒙上报 code=5 |
+| `isSupportCanvas()` | 无 | 当前平台是否支持 canvas 标注（Web=true；Android/iOS/鸿蒙=false） |
+
+```ts
+// 切换为自定义样式（OSM 底图示例）
+mapRef.value?.setStyle(JSON.stringify({
+  version: 8,
+  glyphs: 'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf',
+  sources: { osm: { type: 'raster', tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'], tileSize: 256 } },
+  layers: [{ id: 'osm-layer', type: 'raster', source: 'osm' }]
+}))
+
+// 还原天地图底图（用户图层自动重建）
+mapRef.value?.removeStyle()
+
+// WMS 叠加（贴底 + 80% 不透明度）
+mapRef.value?.addWMSTileLayer('wms-demo', 'https://demo.pygeoapi.io/master/wms', 'world', { opacity: 0.8, zIndex: 0 })
+
+// 清除边界限制
+mapRef.value?.setMapMaxBounds(null, null, null, null)
+```
+
+> ⚠️ 平台差异：鸿蒙 MapKit 的样式 schema 与 MapLibre style spec 不兼容，`setStyle`/`addWMSTileLayer` 会通过 `mapError` 事件上报 code=5（平台不支持），`isSupportCanvas` 返回 false。
+> `zIndex` 仅支持 `0`（插到底图注记层之下）与缺省（默认置顶），其他值忽略并 warn。
 
 ### 覆盖物
 

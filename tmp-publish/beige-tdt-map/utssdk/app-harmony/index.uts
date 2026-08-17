@@ -8,7 +8,7 @@ import { buildMapComponent, TDTMapBuilderOptions } from './builder.ets'
 import {
     TDMapOptions, MapClickDetail, MapBoundsDetail, MapErrorDetail, MapSizeDetail, MapViewportDetail,
     MapClickCallback, MapReadyCallback, MapErrorCallback, MarkerClickCallback, GeocodeCallback, SearchOptions,
-    MapLongClickCallback, CameraChangeCallback, ClusterOptions, HeatmapItem, HeatmapOptions
+    MapLongClickCallback, CameraChangeCallback, ClusterOptions, HeatmapItem, HeatmapOptions, TileLayerOptions
 } from '../interface.uts'
 
 // ⚠️ 天地图 Key 类型说明（自新系统升级后严格区分，混用会导致瓦片不显示）:
@@ -760,12 +760,12 @@ export function clearOverlays(): void {
     })
 }
 
-export function snapshot(): ArrayBuffer {
-    // HarmonyOS MapKit 无快照 API，回调错误并返回空 ArrayBuffer（平台差异显式上报，禁止静默失败）
+export function snapshot(callback: (data: ArrayBuffer) => void): void {
+    // HarmonyOS MapKit 无快照 API，上报错误并回调空 ArrayBuffer（平台差异显式上报，禁止静默失败）
     if (onErrorCallback != null) {
         onErrorCallback({ code: 4, message: 'Snapshot not supported on HarmonyOS MapKit' })
     }
-    return new ArrayBuffer(0)
+    callback(new ArrayBuffer(0))
 }
 
 export function onResume(): void { /* MapKit 自动管理 */ }
@@ -922,8 +922,18 @@ export function enableDrag(enabled: boolean): void {
 
 // ==================== 范围限制 ====================
 
-export function setMaxBounds(minLat: number, minLng: number, maxLat: number, maxLng: number): void {
+export function setMaxBounds(minLat: number | null, minLng: number | null, maxLat: number | null, maxLng: number | null): void {
     if (mapController == null) return
+    if (minLat == null || minLng == null || maxLat == null || maxLng == null) {
+        // v1.8.0: 可空签名清除。context7: 华为文档未确认 setLatLngBounds(null) 行为 →
+        // 保守方案：全球 Web Mercator 范围等效清除（不依赖未验证 API）
+        const world: mapCommon.LatLngBounds = {
+            southwest: { latitude: -85.05112878, longitude: -180 },
+            northeast: { latitude: 85.05112878, longitude: 180 }
+        }
+        mapController.setLatLngBounds(world)
+        return
+    }
     const bounds: mapCommon.LatLngBounds = {
         southwest: { latitude: minLat, longitude: minLng },
         northeast: { latitude: maxLat, longitude: maxLng }
@@ -1389,7 +1399,7 @@ export function hideMarkerInfo(id: number): void {
 // context7 验证：HarmonyOS MapKit addTileOverlay 最多支持 10 个瓦片图层
 let customTileOverlays = new Map<string, map.TileOverlay>()
 
-export function addCustomTileLayer(id: string, tileUrl: string): void {
+export function addCustomTileLayer(id: string, tileUrl: string, options?: TileLayerOptions): void {
     if (mapController == null) {
         if (onErrorCallback != null) {
             onErrorCallback({ code: 4, message: "地图未初始化，无法添加瓦片图层" })
@@ -1399,14 +1409,23 @@ export function addCustomTileLayer(id: string, tileUrl: string): void {
     // 若已存在同 ID 图层，先移除旧层
     removeCustomTileLayer(id)
     try {
-        const options: mapCommon.TileOverlayParams = {
+        // v1.8.0: options 映射——仅 transparency 官方支持（华为 Map Kit 文档确认，
+        // transparency=0 不透明、1 全透明，与 opacity 互补）；其余能力 warn 忽略
+        const transparencyValue = options != null && options.opacity != null ? 1 - options.opacity : 0
+        const tileOptions: mapCommon.TileOverlayParams = {
             tileUrl: tileUrl,
-            transparency: 0,
+            transparency: transparencyValue,
             fadeIn: true
         }
         // context7 验证：addTileOverlay 返回 TileOverlay（同步，非 Promise），直接赋值即可
-        const overlay = mapController.addTileOverlay(options)
+        const overlay = mapController.addTileOverlay(tileOptions)
         customTileOverlays.set(id, overlay)
+        if (options != null && options.zIndex != null) {
+            console.warn("TDTMap: 鸿蒙 TileOverlay 不支持 zIndex，已忽略")
+        }
+        if (options != null && (options.minZoom != null || options.maxZoom != null)) {
+            console.warn("TDTMap: 鸿蒙 TileOverlay 不支持 minZoom/maxZoom，已忽略")
+        }
     } catch (e: any) {
         console.error("TDTMap: addCustomTileLayer 异常: " + (e.message ?? String(e)))
         if (onErrorCallback != null) {
@@ -1424,6 +1443,36 @@ export function removeCustomTileLayer(id: string): void {
         console.error("TDTMap: removeCustomTileLayer 失败: " + (e.message ?? String(e)))
     }
     customTileOverlays.delete(id)
+}
+
+// ══════════════════════════════════════════════
+// v1.8.0 新增：样式切换 / WMS / canvas 探测（图层增强，鸿蒙降级）
+// ══════════════════════════════════════════════
+
+// context7: 华为开发者文档——MapKit 样式自定义仅支持 styleId（Petal Maps Studio 产物），
+// 样式 JSON 为华为自有 schema，与 MapLibre style spec 不兼容，显式降级上报
+// （规则要求：平台差异能力必须通过错误回调显式上报，禁止静默失败）
+export function setStyle(styleJson: string): void {
+    console.warn("TDTMap: 鸿蒙 MapKit 不支持 MapLibre 样式 JSON（华为样式 schema 不兼容，请使用 styleId）")
+    if (onErrorCallback != null) {
+        onErrorCallback({ code: 5, message: "平台不支持：鸿蒙 MapKit 样式 JSON 为华为自有 schema，与 MapLibre style spec 不兼容" })
+    }
+}
+
+export function removeStyle(): void {
+    // 鸿蒙从未支持 setStyle，无自定义样式状态，幂等 no-op（与三端语义一致）
+}
+
+// context7: 华为 Map Kit 官方文档——TileOverlay tileUrl 仅支持 {x}{y}{z} 占位符，无法 WMS bbox 寻址
+export function addWMSTileLayer(id: string, wmsUrl: string, layers: string, options?: TileLayerOptions): void {
+    console.warn("TDTMap: 鸿蒙 TileOverlay 仅支持 {x}{y}{z} 模板，不支持 WMS")
+    if (onErrorCallback != null) {
+        onErrorCallback({ code: 5, message: "平台不支持：鸿蒙 TileOverlay 仅支持 {x}{y}{z} 占位符，无法加载 WMS 图层" })
+    }
+}
+
+export function isSupportCanvas(): boolean {
+    return false
 }
 
 // ══════════════════════════════════════════════

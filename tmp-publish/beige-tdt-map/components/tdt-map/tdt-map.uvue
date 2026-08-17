@@ -118,10 +118,15 @@ import {
   addMarkerCluster as nativeAddMarkerCluster,
   removeMarkerCluster as nativeRemoveMarkerCluster,
   addHeatmap as nativeAddHeatmap,
-  removeHeatmap as nativeRemoveHeatmap
+  removeHeatmap as nativeRemoveHeatmap,
+  // v1.8.0: 重命名导入避免与下方同名 setup 函数冲突
+  setStyle as nativeSetStyle,
+  removeStyle as nativeRemoveStyle,
+  addWMSTileLayer as nativeAddWMSTileLayer,
+  isSupportCanvas as nativeIsSupportCanvas
 } from '@/uni_modules/beige-tdt-map'
 import globalConfig from '@/uni_modules/beige-tdt-map/config'
-import type { MapClickDetail, MapBoundsDetail, MapErrorDetail, MapSizeDetail, MapViewportDetail, MarkerClickCallback, GeocodeCallback, SearchOptions, MapLongClickCallback, CameraChangeCallback, ClusterOptions, HeatmapItem, HeatmapOptions } from '@/uni_modules/beige-tdt-map'
+import type { MapClickDetail, MapBoundsDetail, MapErrorDetail, MapSizeDetail, MapViewportDetail, MarkerClickCallback, GeocodeCallback, SearchOptions, MapLongClickCallback, CameraChangeCallback, ClusterOptions, HeatmapItem, HeatmapOptions, TileLayerOptions } from '@/uni_modules/beige-tdt-map'
 
 const props = defineProps({
   apiKey: { type: String, default: '' },
@@ -386,7 +391,7 @@ function drawPolygon(points: Array<LatLng>, color: string, fillColor: string): n
   return addPolygon(detail, color, fillColor)
 }
 function clearAllPolygons(): void { clearPolygons() }
-function takeSnapshot(): ArrayBuffer { return snapshot() }
+function takeSnapshot(callback: (data: ArrayBuffer) => void): void { snapshot(callback) }
 function zoomInOne(): void { zoomIn() }
 function zoomOutOne(): void { zoomOut() }
 function setMinZoomLevel(zoom: number): void { setMinZoom(zoom) }
@@ -419,7 +424,7 @@ function panToLocation(lat: number, lng: number, zoom?: number): void {
 function centerAtZoom(lat: number, lng: number, zoom: number): void { centerAndZoom(lat, lng, zoom) }
 function setZoomEnabled(enabled: boolean): void { enableZoom(enabled) }
 function setDragEnabled(enabled: boolean): void { enableDrag(enabled) }
-function setMapMaxBounds(minLat: number, minLng: number, maxLat: number, maxLng: number): void { setMaxBounds(minLat, minLng, maxLat, maxLng) }
+function setMapMaxBounds(minLat: number | null, minLng: number | null, maxLat: number | null, maxLng: number | null): void { setMaxBounds(minLat, minLng, maxLat, maxLng) }
 function getCurrentBounds(): MapBoundsDetail { return getBounds() }
 function convertGcj02ToWgs84(lat: number, lng: number): MapClickDetail { return gcj02ToWgs84(lat, lng) }
 function drawPolyline(points: Array<LatLng>, color: string, width: number): number {
@@ -574,9 +579,15 @@ function doLocate(): void {
 function showMarkerInfoById(id: number): void { showMarkerInfo(id) }
 function hideMarkerInfoById(id: number): void { hideMarkerInfo(id) }
 
-// ── v1.3.0 新增：自定义瓦片图层 ──
-function addTileLayer(id: string, tileUrl: string): void { addCustomTileLayer(id, tileUrl) }
+// ── v1.3.0 新增：自定义瓦片图层（v1.8.0 支持 options）──
+function addTileLayer(id: string, tileUrl: string, options?: TileLayerOptions): void { addCustomTileLayer(id, tileUrl, options) }
 function removeTileLayer(id: string): void { removeCustomTileLayer(id) }
+
+// ── v1.8.0 新增：图层增强 ──
+function addWMSTileLayer(id: string, wmsUrl: string, layers: string, options?: TileLayerOptions): void { nativeAddWMSTileLayer(id, wmsUrl, layers, options) }
+function setStyle(styleJson: string): void { nativeSetStyle(styleJson) }
+function removeStyle(): void { nativeRemoveStyle() }
+function isSupportCanvas(): boolean { return nativeIsSupportCanvas() }
 
 // ── v1.4.0 新增：地图交互增强 ──
 function setMapBearing(bearing: number): void { setBearing(bearing) }
@@ -674,6 +685,7 @@ defineExpose({
   reverseGeocode, forwardGeocode, keywordSearch, boundsSearch, nearbySearch,
   setShowUserLocation, getCurrentLocation, showMarkerInfoById, hideMarkerInfoById,
   addTileLayer, removeTileLayer,
+  addWMSTileLayer, setStyle, removeStyle, isSupportCanvas,
   setMapBearing, setMapTilt, getMapBearing, getMapTilt, setRotateEnabled, setTiltEnabled,
   addMarkerCluster, removeMarkerCluster, addHeatmap, removeHeatmap,
   isMapReady,

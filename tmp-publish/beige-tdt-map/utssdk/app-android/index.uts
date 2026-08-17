@@ -28,7 +28,8 @@ import {
     TDMapOptions, MapClickDetail, MapBoundsDetail, MapErrorDetail, MapSizeDetail, MapViewportDetail,
     MapClickCallback, MapReadyCallback, MapErrorCallback, MarkerClickCallback, GeocodeCallback, SearchOptions,
     MapLongClickCallback, CameraChangeCallback,
-    ClusterOptions, HeatmapItem, HeatmapOptions
+    ClusterOptions, HeatmapItem, HeatmapOptions,
+    TileLayerOptions
 } from '../interface.uts'
 
 // ⚠️ 天地图 Key 类型说明（自新系统升级后严格区分，混用会导致瓦片不显示）:
@@ -711,66 +712,50 @@ export function clearOverlays(): void {
     clearOverlayType('rectangle')
 }
 
-// 地图截图
-export function snapshot(): ArrayBuffer {
+// 地图截图（异步回调）
+// context7 验证：uni-app x 平台 UTS 函数默认在 main 线程执行（DCloud 官方文档
+// uts-for-android.html §2.4 线程环境差异），MapLibre snapshot 回调也在主线程执行
+// （渲染线程截图完成后 post 回主线程）——主线程同步等待（CountDownLatch.await）
+// 会阻塞消息循环导致回调永不执行（真机实测 5 秒超时死锁），
+// 因此改为异步：发起请求后立即返回，回调在主线程消息循环中执行，无阻塞、无死锁
+export function snapshot(callback: (data: ArrayBuffer) => void): void {
     const m = mapLibreMap
+    const errorCb = onErrorCallback
     if (m == null) {
-        const errorCb = onErrorCallback
         if (errorCb != null) {
             const errDetail: MapErrorDetail = { code: 4, message: "Map 未初始化" }
             errorCb(errDetail)
         }
-        return new ArrayBuffer(0)
+        callback(new ArrayBuffer(0))
+        return
     }
-    const errorCb = onErrorCallback
     try {
-        // context7 验证：snapshot 回调在主线程执行（ARCHITECTURE.md），CountDownLatch 阻塞主线程会导致死锁
-        // ⚠️ 调用方必须在子线程调用 snapshot()，否则 latch.await() 阻塞主线程 → 回调永远无法执行
-        let latch = new java.util.concurrent.CountDownLatch(1)
-        let resultBytes: ByteArray | null = null
-        let snapshotError: string | null = null
         m.snapshot((bitmap: android.graphics.Bitmap) => {
             try {
                 let stream = new java.io.ByteArrayOutputStream()
                 bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, stream)
-                resultBytes = stream.toByteArray()
+                const resultBytes = stream.toByteArray()
                 stream.close()
+                // ByteArray → ByteBuffer → ArrayBuffer（UTS 官方 API：ArrayBuffer.fromByteBuffer）
+                const byteBuffer = java.nio.ByteBuffer.wrap(resultBytes)
+                callback(ArrayBuffer.fromByteBuffer(byteBuffer))
             } catch (e: any) {
-                snapshotError = e.message ?? "snapshot 压缩失败"
+                console.error("TDTMap: snapshot 压缩失败: " + e.message)
+                if (errorCb != null) {
+                    const err: MapErrorDetail = { code: 4, message: "Snapshot 压缩失败: " + e.message }
+                    errorCb(err)
+                }
+                callback(new ArrayBuffer(0))
             }
-            latch.countDown()
         })
-        // 5 秒超时：防止主线程死锁无限等待，超时后返回空并报错
-        const ok = latch.await(5000, java.util.concurrent.TimeUnit.MILLISECONDS)
-        if (!ok) {
-            console.error("TDTMap: snapshot 超时（5秒），可能因主线程调用导致死锁")
-            if (errorCb != null) {
-                const err: MapErrorDetail = { code: 4, message: "Snapshot 超时：快照回调未在 5 秒内完成，请确保在子线程调用 snapshot()" }
-                errorCb(err)
-            }
-            return new ArrayBuffer(0)
-        }
-        if (snapshotError != null) {
-            console.error("TDTMap: snapshot 回调内异常: " + snapshotError)
-            if (errorCb != null) {
-                const err: MapErrorDetail = { code: 4, message: "Snapshot 回调失败: " + snapshotError }
-                errorCb(err)
-            }
-            return new ArrayBuffer(0)
-        }
-        if (resultBytes != null) {
-            // ByteArray → ByteBuffer → ArrayBuffer（UTS 官方 API：ArrayBuffer.fromByteBuffer）
-            const byteBuffer = java.nio.ByteBuffer.wrap(resultBytes)
-            return ArrayBuffer.fromByteBuffer(byteBuffer)
-        }
     } catch (e: any) {
         console.error("TDTMap: snapshot 失败: " + e.message)
         if (errorCb != null) {
             const errDetail: MapErrorDetail = { code: 4, message: "Snapshot 失败: " + e.message }
             errorCb(errDetail)
         }
+        callback(new ArrayBuffer(0))
     }
-    return new ArrayBuffer(0)
 }
 
 export function onResume(): void {
@@ -814,6 +799,9 @@ export function destroyMap(): void {
     currentMapType = 'vec'
     locationComponentActivated = false
     customTileSources.clear()
+    // v1.8.0: 清理图层重建状态（聚合/热力快照已由上方 removeMarkerCluster/removeHeatmap 清空）
+    customTileLayerIds = []
+    customStyleActive = false
 }
 
 // ==================== 缩放控制 ====================
@@ -890,17 +878,21 @@ export function enableDrag(enabled: boolean): void {
 
 // ==================== 范围限制 ====================
 
-export function setMaxBounds(minLat: number, minLng: number, maxLat: number, maxLng: number): void {
+export function setMaxBounds(minLat: number | null, minLng: number | null, maxLat: number | null, maxLng: number | null): void {
     const m = mapLibreMap
-    if (m != null) {
-        const southwest = new LatLng(minLat.toDouble(), minLng.toDouble())
-        const northeast = new LatLng(maxLat.toDouble(), maxLng.toDouble())
-        const bounds = new LatLngBounds.Builder()
-            .include(southwest)
-            .include(northeast)
-            .build()
-        m.setLatLngBoundsForCameraTarget(bounds)
+    if (m == null) return
+    // context7: MapLibre Android 官方 API 注释——传 null 清除当前边界限制
+    if (minLat == null || minLng == null || maxLat == null || maxLng == null) {
+        m.setLatLngBoundsForCameraTarget(null)
+        return
     }
+    const southwest = new LatLng(minLat.toDouble(), minLng.toDouble())
+    const northeast = new LatLng(maxLat.toDouble(), maxLng.toDouble())
+    const bounds = new LatLngBounds.Builder()
+        .include(southwest)
+        .include(northeast)
+        .build()
+    m.setLatLngBoundsForCameraTarget(bounds)
 }
 
 // ==================== 信息获取 ====================
@@ -1674,10 +1666,18 @@ export function hideMarkerInfo(id: number): void {
 // ══════════════════════════════════════════════
 
 // context7 验证：MapLibre RasterSource + RasterLayer 支持外部 XYZ 瓦片
-type CustomTileEntry = { source: any, layer: any }
+type CustomTileEntry = { source: any, layer: any, tileUrl: string, options: TileLayerOptions }
 let customTileSources = new Map<string, CustomTileEntry>()
+// v1.8.0: 平行数组存 key 顺序（重建按添加顺序重放）
+let customTileLayerIds: Array<string> = []
+// v1.8.0: 聚合/热力数据快照 + 自定义样式激活标记
+let clusterDataRef: Array<MapClickDetail> | null = null
+let clusterOptionsRef: ClusterOptions | null = null
+let heatmapDataRef: Array<HeatmapItem> | null = null
+let heatmapOptionsRef: HeatmapOptions | null = null
+let customStyleActive = false
 
-export function addCustomTileLayer(id: string, tileUrl: string): void {
+export function addCustomTileLayer(id: string, tileUrl: string, options?: TileLayerOptions): void {
     const style = mapLibreMap?.getStyle()
     if (style == null) {
         const errCb = onErrorCallback
@@ -1693,8 +1693,38 @@ export function addCustomTileLayer(id: string, tileUrl: string): void {
         const source = new RasterSource(id, tileUrl, 256)
         style.addSource(source)
         const layer = new RasterLayer(id + "-layer", id)
-        style.addLayer(layer)
-        customTileSources.set(id, { source: source, layer: layer })
+        // v1.8.0: options 应用。PropertyFactory.rasterOpacity(Float) / Layer.setMinZoom(float) /
+        // Layer.setMaxZoom(float) 签名均为 float（maplibre-native 官方 Layer.java / PropertyFactory.java），
+        // 与现有 circleRadius/heatmapRadius 一致用 toFloat() 转换
+        if (options != null) {
+            if (options.opacity != null) {
+                layer.setProperties(PropertyFactory.rasterOpacity(options.opacity.toFloat()))
+            }
+            if (options.minZoom != null) {
+                layer.setMinZoom(options.minZoom.toFloat())
+            }
+            if (options.maxZoom != null) {
+                layer.setMaxZoom(options.maxZoom.toFloat())
+            }
+        }
+        if (options != null && options.zIndex == 0) {
+            // zIndex=0: 插到天地图注记层之下（底图之上）。Style.addLayerBelow(Layer, String) 官方 API
+            // v1.8.0 审查修复：自定义样式可能无注记层，addLayerBelow 对缺失引用层抛异常导致静默丢层，
+            // 先判存在再插入，否则回退默认置顶（与 Web 端 getLayer 回退逻辑一致）
+            if (style.getLayer("tdt-label-layer") != null) {
+                style.addLayerBelow(layer, "tdt-label-layer")
+            } else {
+                style.addLayer(layer)
+                console.warn("TDTMap: zIndex=0 但当前样式无注记层，已按默认置顶处理")
+            }
+        } else {
+            style.addLayer(layer)
+            if (options != null && options.zIndex != null && options.zIndex != 0) {
+                console.warn("TDTMap: zIndex 仅支持 0（贴底）与 undefined（置顶），当前值已忽略")
+            }
+        }
+        customTileSources.set(id, { source: source, layer: layer, tileUrl: tileUrl, options: options ?? {} })
+        customTileLayerIds.push(id)
     } catch (e: any) {
         console.error("TDTMap: addCustomTileLayer 失败: " + e.message)
         const errCb2 = onErrorCallback
@@ -1717,6 +1747,100 @@ export function removeCustomTileLayer(id: string): void {
         }
     }
     customTileSources.delete(id)
+    // v1.8.0: 同步清理平行数组（重建顺序依据）
+    const newIds: Array<string> = []
+    for (let i = 0; i < customTileLayerIds.length; i++) {
+        if (customTileLayerIds[i] != id) newIds.push(customTileLayerIds[i])
+    }
+    customTileLayerIds = newIds
+}
+
+// ══════════════════════════════════════════════
+// v1.8.0 新增：WMS / 样式切换 / canvas 探测（图层增强）
+// ══════════════════════════════════════════════
+
+// context7 验证：{bbox-epsg-3857} 为 MapLibre style spec 标准占位符（style spec 官方 + 天地图官方文档确认）
+function buildWmsTileUrl(wmsUrl: string, layers: string): string {
+    const sep = wmsUrl.indexOf('?') >= 0 ? '&' : '?'
+    return wmsUrl + sep + 'SERVICE=WMS&REQUEST=GetMap&VERSION=1.1.1&LAYERS=' + layers +
+        '&STYLES=&FORMAT=image/png&TRANSPARENT=true&SRS=EPSG:3857&BBOX={bbox-epsg-3857}&WIDTH=256&HEIGHT=256'
+}
+
+export function addWMSTileLayer(id: string, wmsUrl: string, layers: string, options?: TileLayerOptions): void {
+    addCustomTileLayer(id, buildWmsTileUrl(wmsUrl, layers), options)
+}
+
+// v1.8.0: 样式切换后重建用户数据图层（按添加顺序重放）
+function rebuildUserLayersAfterStyle(): void {
+    const ids = customTileLayerIds.slice()
+    customTileLayerIds = []
+    const saved: Array<any> = []
+    for (let i = 0; i < ids.length; i++) {
+        const e = customTileSources.get(ids[i])
+        if (e != null) saved.push({ id: ids[i], entry: e })
+    }
+    customTileSources.clear()
+    for (let i = 0; i < saved.length; i++) {
+        addCustomTileLayer(saved[i].id, saved[i].entry.tileUrl, saved[i].entry.options)
+    }
+    if (clusterDataRef != null) {
+        const pts = clusterDataRef
+        const opts = clusterOptionsRef
+        clusterDataRef = null
+        clusterOptionsRef = null
+        addMarkerCluster(pts, opts)
+    }
+    if (heatmapDataRef != null) {
+        const pts = heatmapDataRef
+        const opts = heatmapOptionsRef
+        heatmapDataRef = null
+        heatmapOptionsRef = null
+        addHeatmap(pts, opts)
+    }
+}
+
+export function setStyle(styleJson: string): void {
+    const m = mapLibreMap
+    if (m == null) return
+    // 前置校验：必须含 version 字段，防止解析失败导致地图空白
+    if (styleJson.indexOf('"version"') < 0) {
+        console.error("TDTMap: setStyle 拒绝：JSON 缺少 version 字段")
+        const errCb = onErrorCallback
+        if (errCb != null) {
+            errCb({ code: 4, message: "setStyle 需为含 version 字段的 MapLibre Style Spec JSON" })
+        }
+        return
+    }
+    customStyleActive = true
+    // context7: 与 switchMapType 同款重建模式（现有代码已验证）；Style.Builder.fromJson 官方 API
+    // v1.8.0 审查修复：fromJson 同步解析非法 JSON 会抛异常（含 "version" 子串不能保证合法），
+    // try/catch 防御并回滚 customStyleActive（与 Web 端 JSON.parse 防御对称）
+    try {
+        m.setStyle(new Style.Builder().fromJson(styleJson), (style: Style) => {
+            rebuildUserLayersAfterStyle()
+        })
+    } catch (e: any) {
+        customStyleActive = false
+        console.error("TDTMap: setStyle 解析失败: " + (e.message ?? String(e)))
+        const errCb2 = onErrorCallback
+        if (errCb2 != null) {
+            errCb2({ code: 4, message: "setStyle 解析失败: " + (e.message ?? String(e)) })
+        }
+    }
+}
+
+export function removeStyle(): void {
+    const m = mapLibreMap
+    if (m == null) return
+    if (!customStyleActive) return
+    customStyleActive = false
+    m.setStyle(new Style.Builder().fromJson(buildTiandituStyleJson(currentApiKey, currentMapType)), (style: Style) => {
+        rebuildUserLayersAfterStyle()
+    })
+}
+
+export function isSupportCanvas(): boolean {
+    return false
 }
 
 // ══════════════════════════════════════════════
@@ -1839,6 +1963,8 @@ function buildPointFeatures(points: Array<MapClickDetail>): FeatureCollection {
 // removeSource 统一传字符串 ID（Style.removeSource(String) 与 removeSource(Source) 重载均存在，
 // 传 ID 最简且规避 UTS 重载解析歧义；removeLayer 同理，且图层 ID 固定，无需引用联合类型对象）
 function removeClusterInternal(): void {
+    clusterDataRef = null
+    clusterOptionsRef = null
     const style = mapLibreMap?.getStyle()
     if (style != null) {
         const ids: Array<string> = ["tdt-cluster-layer", "tdt-cluster-count", "tdt-cluster-unclustered"]
@@ -1916,6 +2042,9 @@ export function addMarkerCluster(points: Array<MapClickDetail>, options?: Cluste
         unclusterLayer.setFilter(Expression.not(Expression.has("point_count")))
         style.addLayer(unclusterLayer)
         clusterLayerRefs.push(unclusterLayer)
+        // v1.8.0: 快照数据供样式切换后重建
+        clusterDataRef = points
+        clusterOptionsRef = options ?? null
     } catch (e: any) {
         console.error("TDTMap: 添加聚合图层失败: " + e.message)
         if (errorCb != null) errorCb({ code: 4, message: "添加聚合图层失败: " + e.message })
@@ -1958,6 +2087,9 @@ export function addHeatmap(points: Array<HeatmapItem>, options?: HeatmapOptions)
         )
         style.addLayer(layer)
         heatmapLayerRef = layer
+        // v1.8.0: 快照数据供样式切换后重建
+        heatmapDataRef = points
+        heatmapOptionsRef = options ?? null
     } catch (e: any) {
         console.error("TDTMap: 添加热力图层失败: " + e.message)
         if (errorCb != null) errorCb({ code: 4, message: "添加热力图层失败: " + e.message })
@@ -1966,6 +2098,8 @@ export function addHeatmap(points: Array<HeatmapItem>, options?: HeatmapOptions)
 }
 
 export function removeHeatmap(): void {
+    heatmapDataRef = null
+    heatmapOptionsRef = null
     const style = mapLibreMap?.getStyle()
     if (style != null) {
         // 局部变量承接：heatmapLayerRef 为模块级可变属性，直接传参触发 Kotlin smart cast 编译错误

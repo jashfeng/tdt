@@ -552,12 +552,14 @@ function setTiltEnabledD(enabled: boolean): void { mapRef.value?.setTiltEnabled(
 // ── 截图 & 信息 ──
 
 function takeSnapshot(): void {
-  const data = mapRef.value?.takeSnapshot()
-  if (data != null) {
-    infoText.value = '截图大小: ' + data.byteLength + ' bytes'
-  } else {
-    infoText.value = '截图失败（鸿蒙不支持）'
-  }
+  // v1.7.1: snapshot 已异步化（同步等待在 uni-app x 主线程模式下死锁），回调式接收结果
+  mapRef.value?.takeSnapshot((data: ArrayBuffer) => {
+    if (data != null && data.byteLength > 0) {
+      infoText.value = '截图大小: ' + data.byteLength + ' bytes'
+    } else {
+      infoText.value = '截图失败（鸿蒙不支持）'
+    }
+  })
 }
 
 function showCenter(): void {

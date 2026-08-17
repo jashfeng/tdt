@@ -151,6 +151,15 @@
           <button class="btn" @tap="clearHeatmap">清除热力</button>
         </view>
 
+        <text class="section-title">🎨 图层增强（v1.8.0 新增）</text>
+        <view class="btn-row">
+          <button class="btn" @tap="demoSetStyle">setStyle</button>
+          <button class="btn" @tap="demoRemoveStyle">removeStyle</button>
+          <button class="btn" @tap="demoWms">WMS 叠加</button>
+          <button class="btn" @tap="demoCanvas">canvas 探测</button>
+          <button class="btn" @tap="demoClearBounds">清除边界</button>
+        </view>
+
         <text class="section-title">🗺️ 地图事件日志</text>
         <text v-if="clickLog.length > 0" class="result-text">{{ clickLog }}</text>
       </scroll-view>
@@ -190,6 +199,8 @@ function onMarkerTap(detail: MapClickDetail): void {
 
 function onMapError(err: MapErrorDetail): void {
   console.error('TDTMap Demo: 错误 [' + err.code + ']', err.message)
+  // v1.8.0: 平台不支持（code=5）回显到面板，避免"已叠加"等成功文案误导
+  if (err.code == 5) infoText.value = '当前平台不支持: ' + err.message
 }
 
 // ── v1.4.0 新增：长按事件 ──
@@ -537,12 +548,14 @@ function setTiltEnabledD(enabled: boolean): void { mapRef.value?.setTiltEnabled(
 // ── 截图 & 信息 ──
 
 function takeSnapshot(): void {
-  const data = mapRef.value?.takeSnapshot()
-  if (data != null) {
-    infoText.value = '截图大小: ' + data.byteLength + ' bytes'
-  } else {
-    infoText.value = '截图失败（鸿蒙不支持）'
-  }
+  // v1.7.1: snapshot 已异步化（同步等待在 uni-app x 主线程模式下死锁），回调式接收结果
+  mapRef.value?.takeSnapshot((data: ArrayBuffer) => {
+    if (data != null && data.byteLength > 0) {
+      infoText.value = '截图大小: ' + data.byteLength + ' bytes'
+    } else {
+      infoText.value = '截图失败（鸿蒙不支持）'
+    }
+  })
 }
 
 function showCenter(): void {
@@ -592,6 +605,41 @@ function demoHeatmap(): void {
 function clearHeatmap(): void {
   mapRef.value?.removeHeatmap()
   infoText.value = '热力层已清除'
+}
+
+// ── 图层增强 v1.8.0 ──
+
+function demoSetStyle(): void {
+  const custom = JSON.stringify({
+    version: 8,
+    glyphs: 'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf',
+    sources: {
+      osm: { type: 'raster', tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'], tileSize: 256 }
+    },
+    layers: [{ id: 'osm-layer', type: 'raster', source: 'osm' }]
+  })
+  mapRef.value?.setStyle(custom)
+  infoText.value = 'setStyle 已调用（OSM 样式）'
+}
+
+function demoRemoveStyle(): void {
+  mapRef.value?.removeStyle()
+  infoText.value = 'removeStyle 已调用（恢复天地图）'
+}
+
+function demoWms(): void {
+  mapRef.value?.addWMSTileLayer('wms-demo', 'https://demo.pygeoapi.io/master/wms', 'world', { opacity: 0.8, zIndex: 0 })
+  infoText.value = 'WMS 图层已叠加（opacity=0.8, 贴底）'
+}
+
+function demoCanvas(): void {
+  if (mapRef.value == null) { infoText.value = '地图尚未就绪'; return }
+  infoText.value = 'isSupportCanvas = ' + (mapRef.value.isSupportCanvas() ? 'true' : 'false') + '（当前平台）'
+}
+
+function demoClearBounds(): void {
+  mapRef.value?.setMapMaxBounds(null, null, null, null)
+  infoText.value = '边界限制已清除'
 }
 
 function showZoom(): void {

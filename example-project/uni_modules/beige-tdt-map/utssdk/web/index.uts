@@ -65,6 +65,14 @@ type HeatmapOptions = {
     opacity?: number
 }
 
+// v1.8.0: 瓦片图层选项（与 interface.uts 保持一致）
+type TileLayerOptions = {
+    zIndex?: number
+    opacity?: number
+    minZoom?: number
+    maxZoom?: number
+}
+
 type SearchOptions = {
     keyWord: string
     mapBound?: string
@@ -96,8 +104,15 @@ let polylineList: Array<number> = []
 let circleList: Array<number> = []
 let rectangleList: Array<number> = []
 let labelList: Array<number> = []
-type TileLayerInfo = { sourceId: string, layerId: string }
+type TileLayerInfo = { sourceId: string, layerId: string, tileUrl: string, options: TileLayerOptions }
 let customTileLayers: Map<string, TileLayerInfo> = new Map()
+// v1.8.0: 平行数组存 key 顺序（UTS Map 迭代 API 受限，重建时按添加顺序重放）
+let customTileLayerIds: Array<string> = []
+// v1.8.0: 聚合/热力数据快照（样式切换后重建用）
+let clusterDataRef: Array<MapClickDetail> | null = null
+let clusterOptionsRef: ClusterOptions | null = null
+let heatmapDataRef: Array<HeatmapItem> | null = null
+let heatmapOptionsRef: HeatmapOptions | null = null
 
 type OverlayEntry = {
     type: string          // 'marker' | 'polygon' | 'polyline' | 'circle' | 'rectangle' | 'label'
@@ -190,6 +205,34 @@ function genOverlayId(): number {
 // 核心地图函数
 // ═══════════════════════════════════════════════════════════
 
+// v1.8.0: 抽取天地图底图（base+anno）添加逻辑，供 initMap / removeStyle 复用（与 v1.7.x 代码完全一致，仅位置移动）
+function addTdtBaseLayers(map: any, layerCfg: any): void {
+    map.addSource('tdt-base', {
+        type: 'raster',
+        tiles: [buildTileUrl(layerCfg.map, currentApiKey)],
+        tileSize: 256,
+        maxzoom: 18,
+        minzoom: 1
+    })
+    map.addLayer({
+        id: 'tdt-base-layer',
+        type: 'raster',
+        source: 'tdt-base'
+    })
+    map.addSource('tdt-anno', {
+        type: 'raster',
+        tiles: [buildTileUrl(layerCfg.anno, currentApiKey)],
+        tileSize: 256,
+        maxzoom: 18,
+        minzoom: 1
+    })
+    map.addLayer({
+        id: 'tdt-anno-layer',
+        type: 'raster',
+        source: 'tdt-anno'
+    })
+}
+
 @UTSJS.keepAlive
 export function initMap(
     container: any,  // Web: DOM 元素
@@ -246,33 +289,7 @@ export function initMap(
             })
 
             map.on('load', () => {
-                // 底图
-                map.addSource('tdt-base', {
-                    type: 'raster',
-                    tiles: [buildTileUrl(layerCfg.map, currentApiKey)],
-                    tileSize: 256,
-                    maxzoom: 18,
-                    minzoom: 1
-                })
-                map.addLayer({
-                    id: 'tdt-base-layer',
-                    type: 'raster',
-                    source: 'tdt-base'
-                })
-
-                // 注记
-                map.addSource('tdt-anno', {
-                    type: 'raster',
-                    tiles: [buildTileUrl(layerCfg.anno, currentApiKey)],
-                    tileSize: 256,
-                    maxzoom: 18,
-                    minzoom: 1
-                })
-                map.addLayer({
-                    id: 'tdt-anno-layer',
-                    type: 'raster',
-                    source: 'tdt-anno'
-                })
+                addTdtBaseLayers(map, layerCfg)
 
                 if (mapReadyCallback != null) {
                     mapReadyCallback()
@@ -408,12 +425,13 @@ export function switchMapType(mapType: string): void {
     }
 }
 
-export function snapshot(): ArrayBuffer {
+export function snapshot(callback: (data: ArrayBuffer) => void): void {
     if (mapInstance == null) {
         if (mapErrorCallback != null) {
             mapErrorCallback({ code: 4, message: '地图未初始化' })
         }
-        return new ArrayBuffer(0)
+        callback(new ArrayBuffer(0))
+        return
     }
     try {
         const canvas = mapInstance.getCanvas()
@@ -425,10 +443,10 @@ export function snapshot(): ArrayBuffer {
         for (let i = 0; i < binaryStr.length; i++) {
             bytes[i] = binaryStr.charCodeAt(i)
         }
-        return bytes.buffer as ArrayBuffer
+        callback(bytes.buffer as ArrayBuffer)
     } catch (e: any) {
         console.error('TDTMap Web: snapshot 失败', e)
-        return new ArrayBuffer(0)
+        callback(new ArrayBuffer(0))
     }
 }
 
@@ -493,8 +511,13 @@ export function enableDrag(enabled: boolean): void {
 }
 
 // ── 范围限制 ──
-export function setMaxBounds(minLat: number, minLng: number, maxLat: number, maxLng: number): void {
+export function setMaxBounds(minLat: number | null, minLng: number | null, maxLat: number | null, maxLng: number | null): void {
     if (mapInstance == null) return
+    // context7 验证：MapLibre GL JS 官方文档——setMaxBounds(null) 清除限制
+    if (minLat == null || minLng == null || maxLat == null || maxLng == null) {
+        mapInstance.setMaxBounds(null)
+        return
+    }
     mapInstance.setMaxBounds([[minLng, minLat], [maxLng, maxLat]])
 }
 
@@ -1096,7 +1119,7 @@ function removeCustomTileLayerInternal(layerId: string): void {
     } catch (e) { /* ignore */ }
 }
 
-export function addCustomTileLayer(id: string, tileUrl: string): void {
+export function addCustomTileLayer(id: string, tileUrl: string, options?: TileLayerOptions): void {
     if (mapInstance == null) return
     const sourceId = 'custom-tile-src-' + id
     const layerId = 'custom-tile-layer-' + id
@@ -1105,22 +1128,146 @@ export function addCustomTileLayer(id: string, tileUrl: string): void {
         mapInstance.addSource(sourceId, {
             type: 'raster',
             tiles: [tileUrl],
-            tileSize: 256
+            tileSize: 256,
+            minzoom: options?.minZoom ?? 1,
+            maxzoom: options?.maxZoom ?? 18
         })
-        mapInstance.addLayer({
+        const layerObj: any = {
             id: layerId,
             type: 'raster',
-            source: sourceId
-        })
-        customTileLayers.set(id, { sourceId: sourceId, layerId: layerId })
+            source: sourceId,
+            minzoom: options?.minZoom ?? 1,
+            maxzoom: options?.maxZoom ?? 18,
+            paint: { 'raster-opacity': options?.opacity ?? 1 }
+        }
+        if (options != null && options.zIndex == 0) {
+            // zIndex=0: 插到天地图注记层之下（底图之上）；自定义样式无注记层时回退置顶防静默丢层
+            if (mapInstance.getLayer('tdt-anno-layer') != null) {
+                mapInstance.addLayer(layerObj, 'tdt-anno-layer')
+            } else {
+                mapInstance.addLayer(layerObj)
+                console.warn('TDTMap Web: zIndex=0 但当前样式无注记层，已按默认置顶处理')
+            }
+        } else {
+            mapInstance.addLayer(layerObj)
+            if (options != null && options.zIndex != null && options.zIndex != 0) {
+                console.warn('TDTMap Web: zIndex 仅支持 0（贴底）与 undefined（置顶），当前值已忽略')
+            }
+        }
+        customTileLayers.set(id, { sourceId: sourceId, layerId: layerId, tileUrl: tileUrl, options: options ?? {} })
+        customTileLayerIds.push(id)
     } catch (e: any) {
         console.error('TDTMap Web: addCustomTileLayer 失败', e)
     }
 }
 
+// v1.8.0: WMS GetMap 模板拼装。
+// context7 验证：{bbox-epsg-3857} 为 MapLibre style spec 标准占位符（style spec 官方 + 天地图官方文档确认）
+function buildWmsTileUrl(wmsUrl: string, layers: string): string {
+    const sep = wmsUrl.indexOf('?') >= 0 ? '&' : '?'
+    return wmsUrl + sep + 'SERVICE=WMS&REQUEST=GetMap&VERSION=1.1.1&LAYERS=' + layers +
+        '&STYLES=&FORMAT=image/png&TRANSPARENT=true&SRS=EPSG:3857&BBOX={bbox-epsg-3857}&WIDTH=256&HEIGHT=256'
+}
+
+export function addWMSTileLayer(id: string, wmsUrl: string, layers: string, options?: TileLayerOptions): void {
+    addCustomTileLayer(id, buildWmsTileUrl(wmsUrl, layers), options)
+}
+
+// v1.8.0: 样式切换后重建用户数据图层（按添加顺序重放）
+function rebuildUserLayersAfterStyle(): void {
+    const ids = customTileLayerIds.slice()
+    customTileLayerIds = []
+    const saved: Array<any> = []
+    for (let i = 0; i < ids.length; i++) {
+        const info = customTileLayers.get(ids[i])
+        if (info != null) saved.push({ id: ids[i], info: info })
+    }
+    customTileLayers.clear()
+    for (let i = 0; i < saved.length; i++) {
+        addCustomTileLayer(saved[i].id, saved[i].info.tileUrl, saved[i].info.options)
+    }
+    if (clusterDataRef != null) {
+        const pts = clusterDataRef
+        const opts = clusterOptionsRef
+        clusterDataRef = null
+        clusterOptionsRef = null
+        addMarkerCluster(pts, opts)
+    }
+    if (heatmapDataRef != null) {
+        const pts = heatmapDataRef
+        const opts = heatmapOptionsRef
+        heatmapDataRef = null
+        heatmapOptionsRef = null
+        addHeatmap(pts, opts)
+    }
+}
+
+// v1.8.0: 样式完成监听注册（保证任意时刻只有一个待触发监听，
+// 防止快速连续 setStyle/removeStyle 时多个 once 监听同时触发导致重复重建、状态与地图脱节）
+// context7 修正：MapLibre GL JS 的 map 事件列表不存在 'style.load'（那是 Style 对象私有事件），
+// setStyle 换样式完成后触发的是 'styledata'（官方文档：Fired whenever the map's style changes）。
+// 浏览器实测：setStyle 后事件序列仅 styledata（POC v1.8.0 实测发现 'style.load' 永不触发）
+let styleLoadHandler: (() => void) | null = null
+
+function registerStyleLoadHandler(fn: () => void): void {
+    if (mapInstance == null) return
+    if (styleLoadHandler != null) {
+        mapInstance.off('styledata', styleLoadHandler)
+    }
+    styleLoadHandler = fn
+    mapInstance.once('styledata', styleLoadHandler)
+}
+
+export function setStyle(styleJson: string): void {
+    if (mapInstance == null) return
+    let parsed: any = null
+    try {
+        parsed = JSON.parse(styleJson)
+    } catch (e: any) {
+        console.error('TDTMap Web: setStyle JSON 解析失败', e)
+        if (mapErrorCallback != null) {
+            mapErrorCallback({ code: 4, message: 'setStyle JSON 解析失败' })
+        }
+        return
+    }
+    if (parsed == null || parsed.version == null) {
+        if (mapErrorCallback != null) {
+            mapErrorCallback({ code: 4, message: 'setStyle 需为含 version 字段的 MapLibre Style Spec JSON' })
+        }
+        return
+    }
+    mapInstance.setStyle(parsed)
+    registerStyleLoadHandler((): void => {
+        rebuildUserLayersAfterStyle()
+    })
+}
+
+export function removeStyle(): void {
+    if (mapInstance == null) return
+    const cfg = LAYER_CONFIG.get(currentMapType)
+    if (cfg == null) return
+    mapInstance.setStyle({ version: 8, glyphs: 'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf', sources: {}, layers: [] })
+    registerStyleLoadHandler((): void => {
+        if (mapInstance == null) return
+        addTdtBaseLayers(mapInstance, cfg)
+        rebuildUserLayersAfterStyle()
+    })
+}
+
+export function isSupportCanvas(): boolean {
+    // Web 的 MapLibre GL JS 支持 HTML/canvas Marker
+    return true
+}
+
 export function removeCustomTileLayer(id: string): void {
     removeCustomTileLayerInternal(id)
     customTileLayers.delete(id)
+    // v1.8.0: 同步清理平行数组
+    const newIds: Array<string> = []
+    for (let i = 0; i < customTileLayerIds.length; i++) {
+        if (customTileLayerIds[i] != id) newIds.push(customTileLayerIds[i])
+    }
+    customTileLayerIds = newIds
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -1188,6 +1335,9 @@ let clusterLayerIds: Array<string> = []
 
 function removeClusterInternal(): void {
     if (mapInstance == null) return
+    // v1.8.0: 清理数据快照
+    clusterDataRef = null
+    clusterOptionsRef = null
     // 移除 click 监听（幂等：off 未注册的监听不报错）
     mapInstance.off('click', 'tdt-cluster-layer', onClusterClick)
     for (let i = 0; i < clusterLayerIds.length; i++) {
@@ -1278,6 +1428,9 @@ export function addMarkerCluster(points: Array<MapClickDetail>, options?: Cluste
         })
         clusterLayerIds.push('tdt-cluster-unclustered')
         mapInstance.on('click', 'tdt-cluster-layer', onClusterClick)
+        // v1.8.0: 保存数据快照（样式切换后重建）
+        clusterDataRef = points
+        clusterOptionsRef = options ?? null
     } catch (e: any) {
         console.error('TDTMap Web: addMarkerCluster 失败', e)
     }
@@ -1327,6 +1480,9 @@ export function addHeatmap(points: Array<HeatmapItem>, options?: HeatmapOptions)
                 ]
             }
         })
+        // v1.8.0: 保存数据快照（样式切换后重建）
+        heatmapDataRef = points
+        heatmapOptionsRef = options ?? null
     } catch (e: any) {
         console.error('TDTMap Web: addHeatmap 失败', e)
     }
@@ -1334,6 +1490,9 @@ export function addHeatmap(points: Array<HeatmapItem>, options?: HeatmapOptions)
 
 export function removeHeatmap(): void {
     if (mapInstance == null) return
+    // v1.8.0: 清理数据快照
+    heatmapDataRef = null
+    heatmapOptionsRef = null
     try { mapInstance.removeLayer('tdt-heatmap-layer') } catch (e) { /* ignore */ }
     try { mapInstance.removeSource('tdt-heatmap-source') } catch (e) { /* ignore */ }
 }

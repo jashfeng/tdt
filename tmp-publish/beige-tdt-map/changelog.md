@@ -1,5 +1,15 @@
 # beige-tdt-map 更新日志
 
+## 1.8.0（发布时填写日期）
+
+- ✨ 新增：`setStyle` / `removeStyle`——运行时替换/还原 MapLibre 样式（style spec JSON，须含 version 字段），切换后自动重建用户图层（自定义瓦片/WMS/聚合/热力），天底图由自定义样式自带
+- ✨ 新增：`addWMSTileLayer`——WMS 服务叠加，自动拼装 GetMap 请求（Android/iOS/Web；鸿蒙上报 code=5）
+- ✨ 新增：`addCustomTileLayer`/`addTileLayer` 支持 options（opacity/minZoom/maxZoom/zIndex，zIndex 仅支持 0 与缺省）
+- ✨ 新增：`setMaxBounds`/`setMapMaxBounds` 参数可空——传 null 清除范围限制
+- ✨ 新增：`isSupportCanvas`——平台 canvas 标注能力探测（Web=true；其余 false）
+- 🐛 修复：iOS setStyle 后天地图瓦片叠影——delegate 增加三态拦截（styleRebuildMode），setStyle 后不再无条件重建天底图
+- ⚠️ 鸿蒙：`setStyle`/`addWMSTileLayer` 显式上报 mapError code=5（平台不支持，不静默失败）；options 仅 transparency（opacity）生效
+
 ## 1.7.0（发布时填写日期）
 
 - ✨ 新增：标记聚合 `addMarkerCluster` / `removeMarkerCluster`——海量 POI 自动聚合显示，聚合簇带数量徽标，点击自动放大展开（Android/iOS/Web 走 MapLibre GeoJSON cluster，鸿蒙走华为原生 addClusterOverlay）
